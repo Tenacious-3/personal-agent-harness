@@ -90,6 +90,7 @@ export function Area({
     <label className="native-field">
       {label}
       <textarea
+        aria-label={label}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         rows={rows}

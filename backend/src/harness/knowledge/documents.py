@@ -34,6 +34,12 @@ def document_path(value):
 class MemoryDocuments:
     def __init__(self,store): self.store=store
 
+    def check_workspace(self,workspace,path):
+        path=document_path(path)
+        target=workspace._checked(path,create_parents=True)
+        if target.exists() and not self.store.db.execute('SELECT 1 FROM memory_documents WHERE path_key=?',(path.casefold(),)).fetchone() and path not in (self.store.get_setting('managedDocumentFiles') or []):
+            raise ValueError('An untracked file already exists at this path; choose another document path')
+
     @staticmethod
     def decode(row):
         return dict(id=row['id'],path=row['path'],content=row['content'],sourceIds=json.loads(row['source_ids']),
@@ -41,9 +47,9 @@ class MemoryDocuments:
 
     def list(self,offset=0):
         if type(offset) is not int or offset<0: raise ValueError('Invalid document offset')
-        rows=self.store.db.execute('SELECT * FROM memory_documents ORDER BY path_key LIMIT 51 OFFSET ?',(offset,)).fetchall()
-        return dict(documents=[{k:v for k,v in self.decode(row).items() if k!='content'} for row in rows[:50]],
-                    nextOffset=offset+50 if len(rows)>50 else None,privacyRevision=self.store.revision())
+        rows=self.store.db.execute('SELECT * FROM memory_documents ORDER BY path_key LIMIT 21 OFFSET ?',(offset,)).fetchall()
+        return dict(documents=[{**{k:v for k,v in self.decode(row).items() if k not in ('content','sourceIds')},'sourceCount':len(json.loads(row['source_ids']))} for row in rows[:20]],
+                    nextOffset=offset+20 if len(rows)>20 else None,privacyRevision=self.store.revision())
 
     def read(self,id_):
         row=self.store.db.execute('SELECT * FROM memory_documents WHERE id=?',(id_,)).fetchone()
@@ -71,6 +77,8 @@ class MemoryDocuments:
         path=document_path(body.get('path'))
         content=body.get('content')
         if not isinstance(content,str) or not content.strip() or len(content)>12000: raise ValueError('Document content must have 1-12000 characters')
+        if re.search(r'sk-[\w-]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|Bearer\s+[\w.-]{24,}',content):
+            raise ValueError('Do not store authentication credentials in memory documents')
         def work():
             if privacy_revision is None or type(privacy_revision) is not int or privacy_revision!=self.store.revision():
                 raise ValueError('Memory privacy revision changed; re-read sources')
@@ -84,6 +92,8 @@ class MemoryDocuments:
             if refs or not owner: self.sources(refs)
             if not isinstance(refs,list): raise ValueError('Invalid document source IDs')
             refs=list(dict.fromkeys(refs))
+            if len(json.dumps(dict(path=path,content=content,sourceIds=refs),ensure_ascii=False))>12000:
+                raise ValueError('Document and sources are too large; split this into smaller sourced notes')
             if not old:
                 duplicate=self.store.db.execute('SELECT * FROM memory_documents WHERE content=? AND source_ids=?',(content,json.dumps(refs))).fetchone()
                 if duplicate: return {**self.decode(duplicate),'deduplicated':True}

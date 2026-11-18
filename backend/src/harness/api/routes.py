@@ -8,7 +8,6 @@ from starlette.responses import JSONResponse, Response
 
 from harness.core.utils import text, dump, safe_error
 from harness.knowledge.memory import build_context, build_context_packet
-from harness.knowledge.documents import document_path
 
 
 async def dispatch(runtime, method, path, body=None, query=None):
@@ -54,7 +53,9 @@ async def dispatch(runtime, method, path, body=None, query=None):
             if route == '/browser/tabs': return JSONResponse({'tabs': await runtime.browser.tabs()})
             if route == '/browser/snapshot': return JSONResponse(await runtime.browser.snapshot(query.get('tabId', '')))
             if route == '/browser/screenshot': return Response(base64.b64decode((await runtime.browser.screenshot(query.get('tabId', '')))['base64']), media_type='image/png')
-            if route == '/files': return JSONResponse({'entries': [{**e, 'type': 'directory' if e['directory'] else 'file'} for e in await runtime.workspace.list(query.get('path', ''))]})
+            if route == '/files':
+                runtime.check_memory_file(query.get('path',''))
+                return JSONResponse({'entries': [{**e, 'type': 'directory' if e['directory'] else 'file'} for e in await runtime.workspace.list(query.get('path', ''))]})
             if route in ('/files/read', '/files/download'):
                 path_ = query.get('path', ''); runtime.check_memory_file(path_); file = await runtime.workspace.read(path_)
                 if route.endswith('download'): return Response(file['content'], media_type='application/octet-stream', headers={'Content-Disposition': 'attachment; filename="artifact.txt"'})
@@ -62,7 +63,7 @@ async def dispatch(runtime, method, path, body=None, query=None):
             if route == '/settings': return JSONResponse({'timezone': runtime.store.get_setting('timezone') or 'America/Toronto', 'nightlyDreamEnabled': runtime.store.get_setting('nightlyDreamEnabled') is not False})
         if method == 'POST':
             if route=='/memory-documents':
-                runtime.workspace._checked(document_path(body.get('path')),create_parents=True)
+                runtime.documents.check_workspace(runtime.workspace,body.get('path'))
                 document=runtime.documents.save(body,owner=True,privacy_revision=body.get('privacyRevision'))
                 runtime.privacy_epoch+=1
                 await runtime.project_memory()
@@ -194,7 +195,7 @@ async def dispatch(runtime, method, path, body=None, query=None):
                 return JSONResponse({'ok': True})
         if method == 'DELETE':
             if re.fullmatch(r'/memory-documents/[^/]+',route):
-                result=runtime.documents.remove(id_,body.get('expectedRevision')); runtime.privacy_epoch+=1
+                result=runtime.documents.remove(id_,body.get('expectedRevision',int(query.get('expectedRevision',-1)))); runtime.privacy_epoch+=1
                 await runtime.project_memory()
                 return JSONResponse({**result,'projectionPending':bool(runtime.store.get_setting('memoryProjectionStale'))})
             if re.fullmatch(r'/workflow-templates/[^/]+',route): return JSONResponse({'deleted':runtime.templates.delete(id_)})

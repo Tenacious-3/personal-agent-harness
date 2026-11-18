@@ -1,4 +1,5 @@
 import json
+import asyncio
 from pathlib import Path
 import tempfile
 import unittest
@@ -70,6 +71,81 @@ class DocumentTests(unittest.TestCase):
 
 
 class DocumentRuntimeTests(OfflineAsyncCase):
+    async def test_symlink_namespace_cannot_write_outside_workspace(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); outside=root/'outside'; outside.mkdir()
+            runtime=Runtime(Config(root=root,data_dir=root/'.assistant',token='document-test-token-at-least-24-characters',encryption_secret='document-test-key-at-least-24-characters'))
+            try:
+                (runtime.workspace.root/'memory').mkdir()
+                try:(runtime.workspace.root/'memory/agent').symlink_to(outside,target_is_directory=True)
+                except OSError as error:
+                    if getattr(error,'winerror',None)==1314:self.skipTest('Windows symlink privilege unavailable; Linux Docker gate covers this boundary')
+                    raise
+                message=runtime.store.add_message('user','Keep local notes.')
+                with self.assertRaisesRegex(ValueError,'symlink'):
+                    await runtime.operate('memory_documents',dict(action='save',path='memory/agent/escape.md',content='Confined note',sourceIds=['message:'+message['id']],privacyRevision=0))
+                self.assertEqual(list(outside.iterdir()),[])
+                self.assertEqual(runtime.documents.list()['documents'],[])
+            finally:await runtime.close()
+
+    async def test_owner_correction_during_model_run_rejects_stale_document_write(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); ready=asyncio.Event(); proceed=asyncio.Event()
+            async def runner(config,prompt,context,caps):
+                ready.set(); await proceed.wait()
+                return await caps.operate('memory_documents',json.dumps(dict(action='save',path='memory/agent/stale.md',content='Old claim',sourceIds=['message:'+message['id']])))
+            runtime=Runtime(Config(root=root,data_dir=root/'.assistant',token='document-test-token-at-least-24-characters',encryption_secret='document-test-key-at-least-24-characters',api_key='ci-test-only'),runner=runner)
+            try:
+                message=runtime.store.add_message('user','Old claim')
+                memory=runtime.store.save_memory({'text':'Old claim','source':message['id'],'provenance':'explicit'})
+                task=asyncio.create_task(runtime.model('Review retained context','Old claim'))
+                await ready.wait()
+                runtime.store.update_memory(memory['id'],{'text':'Corrected claim','source':'user-correction','provenance':'explicit'})
+                proceed.set()
+                with self.assertRaisesRegex(ValueError,'privacy revision changed'):await task
+                self.assertEqual(runtime.documents.list()['documents'],[])
+            finally:await runtime.close()
+
+    async def test_forget_during_projection_cannot_republish_a_deleted_document(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); ready=asyncio.Event(); proceed=asyncio.Event()
+            class PausedWorkspace(WorkspaceService):
+                pause=True
+                async def write(self,path,content):
+                    if path=='memory/agent/private.md' and self.pause:
+                        self.pause=False; ready.set(); await proceed.wait()
+                    return await super().write(path,content)
+            workspace=PausedWorkspace(root/'workspace')
+            runtime=Runtime(Config(root=root,data_dir=root/'.assistant',token='document-test-token-at-least-24-characters',encryption_secret='document-test-key-at-least-24-characters'),workspace=workspace)
+            try:
+                source=runtime.store.add_message('user','A private retained project claim.')
+                memory=runtime.store.save_memory({'text':'A private retained project claim.','source':source['id'],'provenance':'explicit'})
+                runtime.documents.save(dict(path='memory/agent/private.md',content='A private retained project claim.',sourceIds=['memory:'+memory['id']]),privacy_revision=runtime.store.revision())
+                projection=asyncio.create_task(runtime.project_memory())
+                await ready.wait()
+                runtime.store.forget_memory(memory['id'],True)
+                proceed.set(); report=await projection
+                self.assertNotIn('error',report)
+                self.assertFalse((workspace.root/'memory/agent/private.md').exists())
+                self.assertFalse(runtime.store.get_setting('memoryProjectionStale'))
+                self.assertEqual(runtime.recall.search('private retained')['results'],[])
+            finally:await runtime.close()
+
+    async def test_failed_projection_blocks_files_until_repaired(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            runtime=Runtime(Config(root=root,data_dir=root/'.assistant',token='document-test-token-at-least-24-characters',encryption_secret='document-test-key-at-least-24-characters'))
+            try:
+                source=runtime.store.add_message('user','Retain the checkpoint design.')
+                doc=runtime.documents.save(dict(path='memory/agent/design.md',content='Checkpoint design',sourceIds=['message:'+source['id']]),privacy_revision=0)
+                collision=runtime.workspace.root/doc['path']; collision.mkdir(parents=True)
+                self.assertIn('error',await runtime.project_memory())
+                with self.assertRaisesRegex(ValueError,'stale'):runtime.check_memory_file('memory/agent')
+                collision.rmdir()
+                self.assertNotIn('error',await runtime.project_memory())
+                self.assertIn('Checkpoint design',(await runtime.workspace.read(doc['path']))['content'])
+            finally:await runtime.close()
+
     async def test_real_tools_projection_restart_rename_remove_and_read_only(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder); store=LocalStore(root/'state.sqlite'); workspace=WorkspaceService(root/'workspace')

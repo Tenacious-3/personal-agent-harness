@@ -1,6 +1,7 @@
 """Readable projections and bounded context. SQLite is authoritative."""
 from datetime import datetime, timezone
 import re
+import os
 
 
 async def sync_memory_files(store, workspace):
@@ -28,8 +29,9 @@ async def sync_memory_files(store, workspace):
     for row in store.db.execute('SELECT * FROM memory_documents ORDER BY path_key').fetchall():
         doc=documents.decode(row); wanted.append(doc['path'])
         await workspace.write(doc['path'],documents.render(doc))
+    wanted_keys={os.path.normcase(path) for path in wanted}
     for path in set(store.get_setting('managedMemoryFiles') or []) | set(store.get_setting('managedDocumentFiles') or []):
-        if path not in wanted and (path.startswith('memory/agent/') or re.fullmatch(r'memory/(daily/\d{4}-\d{2}-\d{2}|people/[a-f0-9-]+)\.md', path)):
+        if os.path.normcase(path) not in wanted_keys and (path.startswith('memory/agent/') or re.fullmatch(r'memory/(daily/\d{4}-\d{2}-\d{2}|people/[a-f0-9-]+)\.md', path)):
             try: await workspace.remove(path)
             except FileNotFoundError: pass
     store.set_setting('managedMemoryFiles', wanted)

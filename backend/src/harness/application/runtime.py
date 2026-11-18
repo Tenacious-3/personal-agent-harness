@@ -24,7 +24,7 @@ from harness.persistence.store import LocalStore
 from harness.agents.workflows import research_workflow, workflow_task_id
 from harness.agents.templates import WorkflowTemplates
 from harness.knowledge.sessions import ChatSessions
-from harness.knowledge.documents import MemoryDocuments, document_path
+from harness.knowledge.documents import MemoryDocuments
 from harness.workspace.files import WorkspaceService
 from harness.knowledge.index import HistoryIndex, PeopleGraph, RepairQueue
 from harness.integrations.providers import ProviderRegistry
@@ -127,6 +127,7 @@ class Runtime:
         run_id = str(uuid4()); key = task['id'] if task else run_id
         self.store.reserve_usage(run_id, self.config.daily_token_limit, self.config.run_token_reservation)
         recorded = False; epoch = self.privacy_epoch; memory_revision=self.store.revision()
+        if task: context=(f"CURRENT TASK REFERENCE task:{task['id']}\n"+context)[:12000]
         self.model_tasks[key] = asyncio.current_task()
         def ensure_active():
             if self.stopping or epoch != self.privacy_epoch or (task and self.store.get_task(task['id'])['status'] == 'cancelled'):
@@ -178,7 +179,7 @@ class Runtime:
         return [dict(id=str(uuid4()), title=step, status='pending') if isinstance(step, str) else step for step in value]
 
     def check_memory_file(self, path):
-        if path.startswith('memory/') and self.store.get_setting('memoryProjectionStale'):
+        if (path=='memory' or path.startswith('memory/')) and self.store.get_setting('memoryProjectionStale'):
             raise ValueError('Managed memory files are stale; refresh the memory projection first')
 
     def create_schedule(self, body):
@@ -206,7 +207,7 @@ class Runtime:
             if action in ('list','read'):
                 return self.documents.read(text(args.get('id'))) if action=='read' else self.documents.list(args.get('offset',0))
             if action!='save': raise ValueError('Unknown memory document action')
-            self.workspace._checked(document_path(args.get('path')),create_parents=True)
+            self.documents.check_workspace(self.workspace,args.get('path'))
             result=self.documents.save(args,privacy_revision=args.get('privacyRevision'))
             await self.project_memory()
             return {**result,'projectionPending':bool(self.store.get_setting('memoryProjectionStale'))}
@@ -282,6 +283,7 @@ class Runtime:
                 result = await self.workspace.write(path, text(args.get('content')))
                 self.store.append_event('artifact.written', result, task_id); return result
             if action == 'read': self.check_memory_file(path); return await self.workspace.read(path)
+            self.check_memory_file(path)
             return {'entries': await self.workspace.list(path)}
         if operation == 'skills': return await self.workspace.read_skill(text(args.get('name'))) if action == 'read' else {'skills': await self.workspace.list_skills()}
         if operation == 'gmail_read': return await self.google.read_mail(text(args.get('id'))) if action == 'read' else await self.google.list_mail(text(args.get('query')), 10)

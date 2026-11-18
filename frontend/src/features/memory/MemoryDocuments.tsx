@@ -29,7 +29,7 @@ export function MemoryDocuments({api}:{api:Api}) {
         {!resource.loading&&!list(resource.data,"documents").length&&<Empty title="Useful context, organized over time.">Agent-authored documents will appear here when there is something worth remembering.</Empty>}
       </section>
       <div className="button-row spaced">
-        {offset>0&&<Button label="Previous documents" onClick={()=>setOffset(Math.max(0,offset-50))}/>}
+        {offset>0&&<Button label="Previous documents" onClick={()=>setOffset(Math.max(0,offset-20))}/>}
         {resource.data.nextOffset!=null&&<Button label="More documents" onClick={()=>setOffset(Number(resource.data.nextOffset))}/>}
       </div>
     </Card>
@@ -47,7 +47,7 @@ export function MemoryDocuments({api}:{api:Api}) {
             if(doc.projectionPending)throw new Error("Saved in the database. Readable files need a refresh; stale copies are blocked.");
           },"Reviewed document saved. Your correction is protected.")}/>
           <Button label="Remove document" isDisabled={action.busy} onClick={()=>void action.run(async()=>{
-            const result=await api(`/memory-documents/${encodeURIComponent(txt(selected.id))}`,{expectedRevision:selected.revision},"DELETE");
+            const result=await api(`/memory-documents/${encodeURIComponent(txt(selected.id))}?expectedRevision=${Number(selected.revision)}`,undefined,"DELETE");
             setSelected(null);
             if(result.projectionPending)throw new Error("Document removed from the database. Readable copies need a refresh and are blocked until synchronized.");
           },"Document and its versions removed. Source conversations are retained.")}/>
