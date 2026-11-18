@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Theme } from "@astryxdesign/core/theme";
-import { Button } from "@astryxdesign/core/Button";
-import { TextInput } from "@astryxdesign/core/TextInput";
+import { Button } from "../components/controls";
+import { TextInput } from "../components/controls";
 import { neutralTheme } from "@astryxdesign/theme-neutral/built";
 import { ApiError, createApi, type Item } from "../api/client";
 import { txt } from "../lib/format";

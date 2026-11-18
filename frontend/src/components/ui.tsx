@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Button } from "@astryxdesign/core/Button";
+import { Button } from "./controls";
 import { txt } from "../lib/format";
 export function Empty({
   title,

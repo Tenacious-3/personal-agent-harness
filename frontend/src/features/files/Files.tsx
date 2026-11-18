@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { Button } from "@astryxdesign/core/Button";
-import { TextInput } from "@astryxdesign/core/TextInput";
+import { Button } from "../../components/controls";
+import { TextInput } from "../../components/controls";
 import { type Api } from "../../api/client";
 import { txt, list } from "../../lib/format";
 import { useResource } from "../../hooks/useResource";
 import { useAction } from "../../hooks/useAction";
 import { Card, Feedback, Area } from "../../components/ui";
+import { Icon } from "../../components/Icon";
 
 export function Files({ api }: { api: Api }) {
   const [directory, setDirectory] = useState("");
@@ -85,6 +86,7 @@ export function Files({ api }: { api: Api }) {
               }}
             >
               <span>
+                <Icon name={item.type === "directory" || item.isDirectory ? "folder" : "memory"} size={24}/>
                 {item.type === "directory" || item.isDirectory
                   ? "Folder"
                   : "File"}
