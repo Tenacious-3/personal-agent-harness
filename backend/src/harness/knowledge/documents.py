@@ -77,7 +77,7 @@ class MemoryDocuments:
         path=document_path(body.get('path'))
         content=body.get('content')
         if not isinstance(content,str) or not content.strip() or len(content)>12000: raise ValueError('Document content must have 1-12000 characters')
-        if re.search(r'sk-[\w-]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|Bearer\s+[\w.-]{24,}',content):
+        if re.search(r'\bsk-[\w-]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|Bearer\s+[\w.-]{24,}',content+'\n'+path):
             raise ValueError('Do not store authentication credentials in memory documents')
         def work():
             if privacy_revision is None or type(privacy_revision) is not int or privacy_revision!=self.store.revision():
