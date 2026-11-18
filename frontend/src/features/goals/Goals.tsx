@@ -42,44 +42,9 @@ export function Goals({ api }: { api: Api }) {
         error={resource.error || action.error}
         notice={action.notice}
       />
-      <Card
-        title="Choose a direction"
-        actions={<Refresh reload={resource.reload} />}
-      >
-        <form
-          className="stack-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            save();
-          }}
-        >
-          <TextInput
-            label="Goal"
-            value={title}
-            onChange={setTitle}
-            placeholder="Prepare for my next interview"
-          />
-          <Area
-            label="What success looks like"
-            value={description}
-            onChange={setDescription}
-            rows={2}
-          />
-          <Area
-            label="Starting steps (one per line, optional)"
-            value={steps}
-            onChange={setSteps}
-            rows={3}
-          />
-          <Button
-            label="Create goal"
-            variant="primary"
-            isDisabled={action.busy || !title.trim()}
-            onClick={save}
-          />
-        </form>
-      </Card>
-      <section className="record-list">
+
+      <section className="record-list" aria-label="Your goals">
+        {items.length > 0 && <h2 className="workspace-list-heading">Tracking <span>{items.length}</span></h2>}
         {!items.length && !resource.loading && (
           <Empty title="A clear direction starts here.">
             Create a goal, then ask your assistant to advance it.
@@ -140,6 +105,43 @@ export function Goals({ api }: { api: Api }) {
           </article>
         ))}
       </section>
+      <Card
+        title="Choose a direction"
+        actions={<Refresh reload={resource.reload} />}
+      >
+        <form
+          className="stack-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            save();
+          }}
+        >
+          <TextInput
+            label="Goal"
+            value={title}
+            onChange={setTitle}
+            placeholder="Prepare for my next interview"
+          />
+          <Area
+            label="What success looks like"
+            value={description}
+            onChange={setDescription}
+            rows={2}
+          />
+          <Area
+            label="Starting steps (one per line, optional)"
+            value={steps}
+            onChange={setSteps}
+            rows={3}
+          />
+          <Button
+            label="Create goal"
+            variant="primary"
+            isDisabled={action.busy || !title.trim()}
+            onClick={save}
+          />
+        </form>
+      </Card>
     </>
   );
 }

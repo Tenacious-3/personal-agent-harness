@@ -57,11 +57,11 @@
 .workspace-page-content .stack-form { gap: 18px; }
 .workspace-page-content .button-row { gap: 8px; }
 .workspace-page-content .record-list { border: 0; background: transparent; border-radius: 0; overflow: visible; }
-.workspace-page-content .record { border: 0; border-bottom: 1px solid var(--ws-line); padding: 25px 2px; gap: 18px; }
+.workspace-page-content .record { border: 0; border-bottom: 1px solid var(--ws-line); background: transparent; padding: 25px 2px; gap: 18px; }
 .workspace-page-content .record:first-child { padding-top: 16px; }
 .workspace-page-content .record:last-child { border-bottom: 0; }
 .workspace-page-content .record-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 12px; background: var(--ws-hover); color: var(--ws-muted); font-size: 20px; flex-shrink: 0; }
-.workspace-page-content .record-body>p,.workspace-page-content .task-heading>p { color: var(--ws-text); font-size: 13px; line-height: 1.7; }
+.workspace-page-content .record-body>p,.workspace-page-content .task-heading>p { color: var(--ws-text); font-size: 14px; line-height: 1.7; }
 .workspace-page-content .record-body h3,.workspace-page-content .section-card>h3,.workspace-page-content .browser-observation h3 { color: var(--ws-text); font-size: 14px; font-weight: 550; }
 .workspace-page-content .record-meta,.workspace-page-content .record-body>small { color: var(--ws-muted); font-size: 11px; line-height: 1.6; }
 .workspace-page-content .record-meta { gap: 12px; }
@@ -97,6 +97,13 @@
 .workspace-page-content .recall-kind { background: var(--ws-hover); border-color: var(--ws-line); }
 .workspace-page-content .recall-results-heading { padding-inline: 2px; }
 .workspace-page-content .recall-results-heading p { font-size: 12px; color: var(--ws-muted); }
+.workspace-list-heading { display: flex; align-items: center; gap: 9px; color: light-dark(#3e7854,#8fc3a0); font-size: 14px; font-weight: 550; margin: 6px 0 12px; }
+.workspace-list-heading span { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: light-dark(#dcebe1,#26362b); font-size: 10px; }
+[data-view="goals"] .record-list { margin-bottom: 32px; }
+[data-view="goals"] .record-body h3 { font-size: 16px; }
+.workspace-shell .mcp-tool,.settings-connectors .mcp-tool { border-radius: 14px; background: var(--ws-hover); }
+.workspace-shell .mcp-server,.settings-connectors .mcp-server { border-color: var(--ws-line); }
+.workspace-shell .mcp-tool select,.settings-connectors .mcp-tool select { color: var(--ws-text); background: var(--ws-card); border-color: var(--ws-line); border-radius: 10px; }
 
 @media(max-width:1099px) {
   .workspace-page-view { grid-template-columns: 64px minmax(0,1fr); }
