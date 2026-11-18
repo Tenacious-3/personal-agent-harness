@@ -22,6 +22,11 @@ const icons: Record<string, ReactNode> = {
   "arrow-right": <path d="M4 12h16m-6-6 6 6-6 6"/>,
   panel: <><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M15 3v18"/></>,
   plus: <path d="M12 5v14M5 12h14"/>,
+  folder: <path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11H3V7Z"/>,
+  inbox: <><path d="M4 4h16l2 12v4H2v-4L4 4Z"/><path d="M2 15h6l2 3h4l2-3h6"/></>,
+  browser: <><rect x="2" y="3" width="20" height="18" rx="3"/><path d="M2 8h20M6 5.5h.01M9 5.5h.01"/></>,
+  people: <><circle cx="9" cy="8" r="4"/><path d="M2 21v-3a7 7 0 0 1 14 0v3M16 4a4 4 0 0 1 0 8m3 9v-3a6 6 0 0 0-2-4"/></>,
+  repair: <path d="M14 5a6 6 0 0 0-7 7L2 17l5 5 5-5a6 6 0 0 0 7-7l-4 4-5-5 4-4Z"/>,
 };
 
 export function Icon({ name, size = 20 }: { name: string; size?: number }) {

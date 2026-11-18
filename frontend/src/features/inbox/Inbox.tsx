@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Button } from "@astryxdesign/core/Button";
+import { Button } from "../../components/controls";
 import { type Api } from "../../api/client";
 import { txt, list, time } from "../../lib/format";
 import { session, setSession } from "../../lib/session";

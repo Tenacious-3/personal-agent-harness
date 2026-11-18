@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Button } from "@astryxdesign/core/Button";
-import { TextInput } from "@astryxdesign/core/TextInput";
+import { Button } from "../../components/controls";
+import { TextInput } from "../../components/controls";
 import { type Api } from "../../api/client";
 import { txt, list, time } from "../../lib/format";
 import { useResource } from "../../hooks/useResource";
