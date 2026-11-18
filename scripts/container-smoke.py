@@ -101,9 +101,14 @@ def main():
                "python", "-u", "/app/scripts/container-fixture.py", capture=True)
         wait_ready()
 
-    def verify_persisted(memory_id, approval_id, schedule_id):
+    def verify_persisted(memory_id, approval_id, schedule_id, document_id):
         assert any(item["id"] == memory_id for item in request("/api/memories")["memories"])
         assert len(request("/api/history")["messages"]) == 2
+        document=request(f"/api/memory-documents/{document_id}")
+        assert document['content']=='Synthetic sourced container document'
+        assert document['revision']==1 and document['provenance']=='user_reviewed'
+        assert 'Synthetic sourced container document' in request('/api/files/read?path=memory/agent/container/state.md')['content']
+        assert any(item['id']==document_id for item in request('/api/recall/search',{'query':'Synthetic sourced container document'})['results'])
         approval = next(item for item in request("/api/approvals")["approvals"] if item["id"] == approval_id)
         assert approval["status"] == "completed"
         schedule = next(item for item in request("/api/schedules")["schedules"] if item["id"] == schedule_id)
@@ -120,6 +125,9 @@ def main():
         chat = request("/api/chat", {"message": "Synthetic container chat"})
         assert chat["message"] == "Synthetic container acceptance result"
         memory = request("/api/memories", {"text": "Synthetic container memory"}, expected=201)
+        document=request('/api/memory-documents',{'path':'memory/agent/container/state.md',
+            'content':'Synthetic sourced container document','sourceIds':['memory:'+memory['id']],
+            'privacyRevision':request('/api/memory-documents')['privacyRevision']},expected=201)
         approval = request("/api/actions", {"kind": "skill.save", "summary": "Synthetic exact procedure",
             "payload": {"name": "container-acceptance", "content": "# Synthetic approved procedure"}}, expected=201)
         decision = {"decision": "approved", "expectedDigest": approval["digest"]}
@@ -134,14 +142,14 @@ def main():
         request("/api/browser/launch", {"visible": False})
         request("/api/browser/navigate", {"url": "http://127.0.0.1/private-destination"}, expected=400)
         request("/api/browser/close", {})
-        verify_persisted(memory["id"], approval["id"], schedule["id"])
+        verify_persisted(memory["id"], approval["id"], schedule["id"],document['id'])
         docker("restart", container, capture=True)
         wait_ready()
-        verify_persisted(memory["id"], approval["id"], schedule["id"])
+        verify_persisted(memory["id"], approval["id"], schedule["id"],document['id'])
         docker("stop", "--time", "15", container, capture=True)
         docker("rm", container, capture=True)
         start()
-        verify_persisted(memory["id"], approval["id"], schedule["id"])
+        verify_persisted(memory["id"], approval["id"], schedule["id"],document['id'])
         print("Container auth, exact approval/replay, schedule, browser policy, restart and recreation persistence passed")
     except BaseException:
         docker("logs", "--tail", "80", container, check=False)
