@@ -1,9 +1,11 @@
 """Readable projections and bounded context. SQLite is authoritative."""
 from datetime import datetime, timezone
 import re
+import os
 
 
 async def sync_memory_files(store, workspace):
+    from harness.knowledge.documents import MemoryDocuments
     memories = store.list_memories()
     curated = ['# Curated memory', '', f'Revision: {store.revision()}', '', 'Edit through the Memory view to preserve provenance.', '']
     for memory in memories:
@@ -23,11 +25,17 @@ async def sync_memory_files(store, workspace):
     for person in [m for m in memories if m['kind'] == 'person']:
         path = f"memory/people/{person['id']}.md"; wanted.append(path)
         await workspace.write(path, f"# Person context\n\n{person['text']}\n\nProvenance: {person['provenance']}\nSource IDs: {', '.join(person['sourceIds'])}\n")
-    for path in store.get_setting('managedMemoryFiles') or []:
-        if path not in wanted and re.fullmatch(r'memory/(daily/\d{4}-\d{2}-\d{2}|people/[a-f0-9-]+)\.md', path):
+    documents=MemoryDocuments(store)
+    for row in store.db.execute('SELECT * FROM memory_documents ORDER BY path_key').fetchall():
+        doc=documents.decode(row); wanted.append(doc['path'])
+        await workspace.write(doc['path'],documents.render(doc))
+    wanted_keys={os.path.normcase(path) for path in wanted}
+    for path in set(store.get_setting('managedMemoryFiles') or []) | set(store.get_setting('managedDocumentFiles') or []):
+        if os.path.normcase(path) not in wanted_keys and (path.startswith('memory/agent/') or re.fullmatch(r'memory/(daily/\d{4}-\d{2}-\d{2}|people/[a-f0-9-]+)\.md', path)):
             try: await workspace.remove(path)
             except FileNotFoundError: pass
     store.set_setting('managedMemoryFiles', wanted)
+    store.set_setting('managedDocumentFiles',[p for p in wanted if p.startswith('memory/agent/')])
     return {'files': wanted, 'revision': store.revision(), 'retainedMessageLimit': 1000}
 
 
@@ -49,6 +57,8 @@ def build_context_packet(store, query='', session_id=None):
     def section(label, content, cap):
         if content: parts.append(label + '\n' + content[:cap])
     section('CURRENT GOALS', json.dumps([g for g in store.list_goals() if g['status'] == 'active']), 1200)
+    events=store.list_events(12)
+    section('RECENT EVENT REFERENCES (request is not completion)',json.dumps([dict(id='event:'+e['id'],state=e['type'],taskId=e['taskId']) for e in events],ensure_ascii=False),1000)
     people = PeopleGraph(store).context(query)
     if people['people']: section('USER-REVIEWED PEOPLE', json.dumps(people, ensure_ascii=False), 1200)
     summary_key = 'conversationSummary' if session_id in (None,'legacy') else 'conversationSummary:' + session_id

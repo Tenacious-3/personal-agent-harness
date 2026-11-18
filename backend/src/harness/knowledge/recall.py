@@ -10,8 +10,9 @@ SOURCES = {
     'memory': ('memories', "kind || ' memory'", 'text', 'created_at', '1'),
     'tool': ('events', "'MCP tool result'", 'detail', 'created_at', "type='mcp.result'"),
     'action': ('events', "'Completed action'", 'detail', 'created_at', "type='action.completed'"),
+    'document': ('memory_documents','path',"provenance || char(10) || content",'updated_at','1'),
 }
-SOURCE_TAGS = {'message': 1, 'task': 2, 'workflow': 3, 'memory': 4, 'action': 5, 'tool': 6}
+SOURCE_TAGS = {'message': 1, 'task': 2, 'workflow': 3, 'memory': 4, 'action': 5, 'tool': 6, 'document': 7}
 
 
 def initialize_recall(db):

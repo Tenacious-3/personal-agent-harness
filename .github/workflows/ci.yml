@@ -57,6 +57,9 @@ jobs:
       - name: Exercise every page in both themes on desktop and mobile
         working-directory: .
         run: uv run --locked --directory backend python -u -m tests.ui_pages_acceptance
+      - name: Exercise sourced agent documents, owner corrections and restart
+        working-directory: .
+        run: uv run --locked --directory backend python -u -m tests.ui_documents_acceptance
   backend:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

@@ -19,6 +19,8 @@ async def dispatch(runtime, method, path, body=None, query=None):
             await runtime.google.complete_auth(query.get('code', ''), query.get('state', ''))
             return Response('Google connected. Return to the assistant Connections tab.', media_type='text/plain')
         if method == 'GET':
+            if route=='/memory-documents': return JSONResponse(runtime.documents.list(int(query.get('offset',0))))
+            if re.fullmatch(r'/memory-documents/[^/]+',route): return JSONResponse(runtime.documents.read(id_))
             if route == '/chat-sessions': return JSONResponse({'sessions':runtime.chats.list(query.get('archived')=='true'), 'defaultSessionId':'legacy', 'modelConfigured':bool(runtime.config.api_key)})
             if re.fullmatch(r'/chat-sessions/[^/]+/messages',route): return JSONResponse(runtime.chats.messages(id_,query.get('before')))
             if route == '/workflow-templates': return JSONResponse({'templates':runtime.templates.list()})
@@ -51,13 +53,21 @@ async def dispatch(runtime, method, path, body=None, query=None):
             if route == '/browser/tabs': return JSONResponse({'tabs': await runtime.browser.tabs()})
             if route == '/browser/snapshot': return JSONResponse(await runtime.browser.snapshot(query.get('tabId', '')))
             if route == '/browser/screenshot': return Response(base64.b64decode((await runtime.browser.screenshot(query.get('tabId', '')))['base64']), media_type='image/png')
-            if route == '/files': return JSONResponse({'entries': [{**e, 'type': 'directory' if e['directory'] else 'file'} for e in await runtime.workspace.list(query.get('path', ''))]})
+            if route == '/files':
+                runtime.check_memory_file(query.get('path',''))
+                return JSONResponse({'entries': [{**e, 'type': 'directory' if e['directory'] else 'file'} for e in await runtime.workspace.list(query.get('path', ''))]})
             if route in ('/files/read', '/files/download'):
                 path_ = query.get('path', ''); runtime.check_memory_file(path_); file = await runtime.workspace.read(path_)
                 if route.endswith('download'): return Response(file['content'], media_type='application/octet-stream', headers={'Content-Disposition': 'attachment; filename="artifact.txt"'})
                 return JSONResponse(file)
             if route == '/settings': return JSONResponse({'timezone': runtime.store.get_setting('timezone') or 'America/Toronto', 'nightlyDreamEnabled': runtime.store.get_setting('nightlyDreamEnabled') is not False})
         if method == 'POST':
+            if route=='/memory-documents':
+                runtime.documents.check_workspace(runtime.workspace,body.get('path'))
+                document=runtime.documents.save(body,owner=True,privacy_revision=body.get('privacyRevision'))
+                runtime.privacy_epoch+=1
+                await runtime.project_memory()
+                return JSONResponse({**document,'projectionPending':bool(runtime.store.get_setting('memoryProjectionStale'))},201)
             if route == '/chat-sessions': return JSONResponse(runtime.chats.create(body),201)
             if route == '/workflow-templates': return JSONResponse(runtime.templates.save(body),201)
             if route == '/mcp': return JSONResponse(await runtime.mcp.save(body), 201)
@@ -173,6 +183,7 @@ async def dispatch(runtime, method, path, body=None, query=None):
             if re.fullmatch(r'/repairs/[^/]+',route): return JSONResponse(runtime.repairs.transition(id_,body))
             if re.fullmatch(r'/memories/[^/]+', route):
                 memory = runtime.store.update_memory(id_, dict(text=text(body.get('text')), source='user-correction', provenance='explicit', expectedRevision=body.get('expectedRevision')))
+                runtime.privacy_epoch+=1
                 runtime.repairs.create('correction','memory:'+id_,'User corrected a saved claim. Review related goals, summaries and derived advice; record evidence when repaired.')
                 await runtime.project_memory(); return JSONResponse(memory)
             if re.fullmatch(r'/goals/[^/]+', route): return JSONResponse(runtime.store.update_goal(id_, {k: body[k] for k in ('title', 'status', 'steps') if k in body}))
@@ -183,6 +194,10 @@ async def dispatch(runtime, method, path, body=None, query=None):
                     if not body['nightlyDreamEnabled']: runtime.store.delete_schedule('nightly-dream')
                 return JSONResponse({'ok': True})
         if method == 'DELETE':
+            if re.fullmatch(r'/memory-documents/[^/]+',route):
+                result=runtime.documents.remove(id_,body.get('expectedRevision',int(query.get('expectedRevision',-1)))); runtime.privacy_epoch+=1
+                await runtime.project_memory()
+                return JSONResponse({**result,'projectionPending':bool(runtime.store.get_setting('memoryProjectionStale'))})
             if re.fullmatch(r'/workflow-templates/[^/]+',route): return JSONResponse({'deleted':runtime.templates.delete(id_)})
             if re.fullmatch(r'/mcp/[^/]+', route): return JSONResponse(await runtime.mcp.remove(id_))
             sheet_match = re.fullmatch(r'/google/sheets/([^/]+)', route)

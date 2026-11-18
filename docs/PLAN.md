@@ -176,6 +176,11 @@ runtime compatibility, deployed authentication or hosted persistence.
 
 ## Owner-requested backlog: implement later
 
+After the UI work merged, the owner resumed project work on November 18, 2026.
+The memory-document foundation (#8) is now being implemented in PR #13. Daily
+dreams (#9) and context import (#10) follow that foundation. Actual Cloudflare
+account and deployment setup remains deferred.
+
 The owner requested detailed issues and explicitly deferred implementing these
 features. Keep them as backlog until the owner resumes that work; do not treat
 the active general project goal as permission to silently start these items.

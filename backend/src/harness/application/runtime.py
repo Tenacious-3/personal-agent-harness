@@ -24,6 +24,7 @@ from harness.persistence.store import LocalStore
 from harness.agents.workflows import research_workflow, workflow_task_id
 from harness.agents.templates import WorkflowTemplates
 from harness.knowledge.sessions import ChatSessions
+from harness.knowledge.documents import MemoryDocuments
 from harness.workspace.files import WorkspaceService
 from harness.knowledge.index import HistoryIndex, PeopleGraph, RepairQueue
 from harness.integrations.providers import ProviderRegistry
@@ -54,6 +55,7 @@ class Runtime:
         self.sheets = GoogleSheets(self.store, self.google)
         self.workspace = workspace or WorkspaceService(config.data_dir / 'workspace', docker_enabled=config.docker_enabled, docker_image=config.docker_image)
         self.chats = ChatSessions(self.store)
+        self.documents = MemoryDocuments(self.store)
         self.templates = WorkflowTemplates(self.store)
         self.history_index = HistoryIndex(self.store)
         self.recall = RecallIndex(self.store)
@@ -105,11 +107,16 @@ class Runtime:
         self.store.close()
 
     async def project_memory(self):
+        self.store.set_setting('memoryProjectionStale',True)
         async with self.projection_lock:
             try:
-                report = await sync_memory_files(self.store, self.workspace)
-                self.store.set_setting('memoryProjectionStale', False)
-                return report
+                for _ in range(3):
+                    snapshot=(self.store.revision(),self.store.get_setting('documentGeneration'))
+                    report = await sync_memory_files(self.store, self.workspace)
+                    if snapshot==(self.store.revision(),self.store.get_setting('documentGeneration')):
+                        self.store.set_setting('memoryProjectionStale', False)
+                        return report
+                raise ValueError('Memory changed repeatedly during projection; refresh again')
             except Exception as error:
                 self.store.set_setting('memoryProjectionStale', True)
                 self.store.append_event('memory.projection-failed', {'message': safe_error(error)})
@@ -119,15 +126,19 @@ class Runtime:
         if not self.config.api_key: raise ValueError('Configure OPENAI_API_KEY in .dev.vars')
         run_id = str(uuid4()); key = task['id'] if task else run_id
         self.store.reserve_usage(run_id, self.config.daily_token_limit, self.config.run_token_reservation)
-        recorded = False; epoch = self.privacy_epoch
+        recorded = False; epoch = self.privacy_epoch; memory_revision=self.store.revision()
+        if task: context=(f"CURRENT TASK REFERENCE task:{task['id']}\n"+context)[:12000]
         self.model_tasks[key] = asyncio.current_task()
         def ensure_active():
             if self.stopping or epoch != self.privacy_epoch or (task and self.store.get_task(task['id'])['status'] == 'cancelled'):
                 raise ValueError('Run cancelled or context forgotten')
         async def remember(value):
+            nonlocal memory_revision
             ensure_active()
+            if memory_revision!=self.store.revision(): raise ValueError('Memory privacy revision changed during this run')
             if read_only: raise ValueError('This run is read-only')
             memory = self.store.save_memory(dict(text=value, source=f'run:{run_id}', sourceIds=[m['id'] for m in self.store.list_messages(1)], provenance='inferred', confidence=0.7))
+            memory_revision=self.store.revision()
             await self.project_memory(); return memory
         async def schedule(prompt, run_at, interval_seconds=None):
             ensure_active()
@@ -137,6 +148,9 @@ class Runtime:
             ensure_active()
             args = json.loads(arguments_json)
             if not isinstance(args, dict): raise ValueError('Tool arguments must be a JSON object')
+            if operation=='memory_documents' and args.get('action')=='save':
+                if memory_revision!=self.store.revision(): raise ValueError('Memory privacy revision changed during this run')
+                args={**args,'privacyRevision':memory_revision}
             return await self.operate(operation, args, task, read_only)
         def on_usage(input_tokens, output_tokens):
             nonlocal recorded
@@ -166,7 +180,7 @@ class Runtime:
         return [dict(id=str(uuid4()), title=step, status='pending') if isinstance(step, str) else step for step in value]
 
     def check_memory_file(self, path):
-        if path.startswith('memory/') and self.store.get_setting('memoryProjectionStale'):
+        if (path=='memory' or path.startswith('memory/')) and self.store.get_setting('memoryProjectionStale'):
             raise ValueError('Managed memory files are stale; refresh the memory projection first')
 
     def create_schedule(self, body):
@@ -181,11 +195,23 @@ class Runtime:
         return schedule
 
     async def operate(self, operation, args, task=None, read_only=False):
-        if read_only and operation not in READ_ONLY and not (operation == 'files' and args.get('action') in ('list', 'read')):
+        if operation=='memory_documents' and args.get('action') not in ('list','read') and read_only:
+            raise ValueError('This reflection/subtask is read-only')
+        if operation=='memory_documents' and args.get('action')=='save' and task and task.get('parentId'):
+            raise ValueError('Specialists cannot modify memory documents')
+        if read_only and operation not in READ_ONLY and not (operation in ('files','memory_documents') and args.get('action') in ('list', 'read')):
             raise ValueError('This reflection/subtask is read-only')
         task_id = task['id'] if task else None
         self.store.append_event('tool.requested', {'operation': operation, 'action': args.get('action')}, task_id)
         action = args.get('action')
+        if operation=='memory_documents':
+            if action in ('list','read'):
+                return self.documents.read(text(args.get('id'))) if action=='read' else self.documents.list(args.get('offset',0))
+            if action!='save': raise ValueError('Unknown memory document action')
+            self.documents.check_workspace(self.workspace,args.get('path'))
+            result=self.documents.save(args,privacy_revision=args.get('privacyRevision'))
+            await self.project_memory()
+            return {**result,'projectionPending':bool(self.store.get_setting('memoryProjectionStale'))}
         if operation == 'workflow_templates':
             if args.get('id'):
                 template=self.templates.select(args['id']); offset=args.get('offset',0)
@@ -258,6 +284,7 @@ class Runtime:
                 result = await self.workspace.write(path, text(args.get('content')))
                 self.store.append_event('artifact.written', result, task_id); return result
             if action == 'read': self.check_memory_file(path); return await self.workspace.read(path)
+            self.check_memory_file(path)
             return {'entries': await self.workspace.list(path)}
         if operation == 'skills': return await self.workspace.read_skill(text(args.get('name'))) if action == 'read' else {'skills': await self.workspace.list_skills()}
         if operation == 'gmail_read': return await self.google.read_mail(text(args.get('id'))) if action == 'read' else await self.google.list_mail(text(args.get('query')), 10)

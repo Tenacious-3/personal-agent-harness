@@ -6,6 +6,7 @@ import { txt, obj, pretty, list, time } from "../../lib/format";
 import { useResource } from "../../hooks/useResource";
 import { useAction } from "../../hooks/useAction";
 import { Empty, Card, Status, Feedback, Refresh } from "../../components/ui";
+import { MemoryDocuments } from "./MemoryDocuments";
 
 export function Memory({ api }: { api: Api }) {
   const resource = useResource(api, "/memories");
@@ -30,6 +31,7 @@ export function Memory({ api }: { api: Api }) {
     });
   return (
     <>
+      <MemoryDocuments api={api}/>
       <Feedback
         loading={resource.loading}
         error={resource.error || action.error}

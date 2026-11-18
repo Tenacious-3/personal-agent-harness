@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from harness.agents.workflows import validate_workflow, workflow_task_id
 from harness.knowledge.index import initialize_knowledge, forget_knowledge, invalidate_knowledge
 from harness.knowledge.sessions import initialize_sessions, ChatSessions, DEFAULT_SESSION_ID
+from harness.knowledge.documents import initialize_documents, MemoryDocuments
 
 def _now(): return int(time.time()*1000)
 def _id(): return str(uuid.uuid4())
@@ -92,6 +93,7 @@ class LocalStore:
             CREATE TABLE IF NOT EXISTS usage(run_id TEXT PRIMARY KEY,day TEXT NOT NULL,reserved_tokens INTEGER NOT NULL,input_tokens INTEGER NOT NULL,output_tokens INTEGER NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status,created_at); CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(status,next_run_at); CREATE INDEX IF NOT EXISTS idx_usage_day ON usage(day);''')
             initialize_sessions(self.db)
+            initialize_documents(self.db)
             initialize_knowledge(self.db)
         except BaseException:
             self.db.close()
@@ -186,6 +188,7 @@ class LocalStore:
             r=self.db.execute('SELECT * FROM memories WHERE id=?',(id,)).fetchone()
             if not r: raise ValueError('Memory not found')
             m=self._memory(r); n={**m,**patch}; n.pop('expectedRevision',None)
+            MemoryDocuments(self).invalidate(['memory:'+id,*m['sourceIds']], [m['text']],retired_sources=m['sourceIds'])
             n['text']=_req(n['text'],'Memory',4000); n['source']=_req(n['source'],'Memory source',1000)
             if n['provenance'] not in ('explicit','inferred'): raise ValueError('Invalid memory provenance')
             if n['kind'] not in ('preference','project','person','goal','commitment','fact'): raise ValueError('Invalid memory kind')
@@ -202,6 +205,7 @@ class LocalStore:
             r=self.db.execute('SELECT * FROM memories WHERE id=?',(id,)).fetchone()
             if not r: raise ValueError('Memory not found')
             m=self._memory(r); lineage=self.memory_lineage(id); phrases={m['text'],*(v['snapshot']['text'] for v in lineage)}
+            MemoryDocuments(self).invalidate(['memory:'+id,*m['sourceIds'],*(s for v in lineage for s in v['snapshot']['sourceIds'])],phrases,retired_sources=['memory:'+id,*m['sourceIds'],*(s for v in lineage for s in v['snapshot']['sourceIds'])])
             forget_knowledge(self.db, m, phrases, m['sourceIds'] if include_source_messages else ())
             if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_templates'").fetchone():
                 from harness.agents.templates import WorkflowTemplates

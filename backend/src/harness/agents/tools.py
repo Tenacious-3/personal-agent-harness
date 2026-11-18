@@ -49,7 +49,7 @@ def _build_tools(caps: AgentCapabilities, function_tool: Any, WebSearchTool: Any
             "memory_search:{query}; goals:{action:list|create|update,id?,title?,description?,steps?,status?}; "
             "history_search:{query,semantic?:boolean} searches all retained chat; semantic mode makes extra Luna calls. "
             "recall_search:{query} searches retained chats, memories, tasks, specialist results, workflow plans and completed action records without extra model calls. "
-            "recall_read:{kind:message|memory|task|workflow|action|tool,id} reads a current source, capped at 12000 characters. Search first; cite kind and ID. Past results may be stale; verify before acting. "
+            "recall_read:{kind:message|memory|document|task|workflow|action|tool,id} reads a current source, capped at 12000 characters. Search first; cite kind and ID. Past results may be stale; verify before acting. "
             "people_search:{query} retrieves sourced person/group relationships. "
             "mcp_list:{id?,tool?,offset?} lists compact owner-granted tool names; supply id plus tool to inspect one full inputSchema before calling; mcp_read:{id,tool,arguments:{...}} calls only owner-granted direct-read tools. "
             "MCP endpoints and credentials cannot be configured by agents. For approval tools use mcp.call payload:{id,tool,arguments:{...}} through propose_action. "
@@ -64,6 +64,10 @@ def _build_tools(caps: AgentCapabilities, function_tool: Any, WebSearchTool: Any
             "sheets.update payload:{sheetId:registered-or-discovered-handle,range?:boundedA1,values:JSONrows}; uses literal RAW cells and requires exact approval. "
             "slack.send payload:{channel:exactConversationId,text}; mastodon.publish payload:{text,visibility:public|unlisted|private|direct}. "
             "workflow_templates:{id?,offset?} lists owner-saved team IDs and roles; supply id to inspect one specialist assignment at a time. "
+            "memory_documents:{action:list|read|save,id?,offset?,path?,content?,sourceIds?:[kind:id],expectedRevision?}. "
+            "List compact document metadata; read one ID. Save sourced Markdown at an agent-chosen path under memory/agent/. "
+            "Sources must be retained message:, memory:, task:, workflow: or event: IDs. Read before updating and supply its expectedRevision. "
+            "Documents are inference until owner reviewed; owner-reviewed content cannot be overwritten by the agent. "
             "delegate:{prompt}; workflow:{action:create|list,prompt?,templateId?,specialists?:[{role,prompt}]}; "
             "notify:{title,body}; schedule_cron:{prompt,cron,timezone}; complete_goal_step:{goalId,stepId,result}. "
             "External writes only propose an action; they are not executed until the user approves the exact payload. "
@@ -73,7 +77,7 @@ def _build_tools(caps: AgentCapabilities, function_tool: Any, WebSearchTool: Any
         async def operation_tool(
             operation: Literal["browser_read", "memory_search", "goals", "files", "skills", "gmail_read",
                                "calendar_read", "propose_action", "delegate", "workflow", "notify",
-                               "schedule_cron", "complete_goal_step", "history_search", "people_search", "provider_read", "sheets_read", "recall_search", "recall_read", "mcp_list", "mcp_read", "workflow_templates"],
+                               "schedule_cron", "complete_goal_step", "history_search", "people_search", "provider_read", "sheets_read", "recall_search", "recall_read", "mcp_list", "mcp_read", "workflow_templates", "memory_documents"],
             argumentsJson: str,
         ) -> Any:
             if len(argumentsJson) > 16000:
