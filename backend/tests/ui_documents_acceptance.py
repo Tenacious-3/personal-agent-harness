@@ -64,10 +64,15 @@ class DocumentUIAcceptance(unittest.TestCase):
                             self.assertEqual(reviewed['revision'],3)
                             found=api.post('/api/recall/search',json={'query':'Owner correction'}).json()['results']
                             self.assertIn(reviewed['id'],[item['id'] for item in found])
+                    # Linux may retain the prior connection in TIME_WAIT. A new
+                    # listener tests durable state without relying on port reuse.
+                    config.port=0
                     with serve(config,factory) as restarted:
                         with httpx.Client(base_url=restarted,trust_env=False,headers={'Authorization':'Bearer '+TOKEN}) as api:
                             self.assertEqual(len(api.get('/api/memory-documents').json()['documents']),2)
                         page.goto(restarted)
+                        page.get_by_label('Workspace access token',exact=True).fill(TOKEN)
+                        page.get_by_role('button',name='Connect workspace',exact=True).click()
                         page.get_by_role('button',name='Memory',exact=True).click()
                         page.get_by_role('button',name='Open document memory/agent/project/decisions.md',exact=True).click()
                         page.get_by_role('button',name='Remove document',exact=True).click()
