@@ -135,6 +135,7 @@ class Runtime:
         async def remember(value):
             nonlocal memory_revision
             ensure_active()
+            if memory_revision!=self.store.revision(): raise ValueError('Memory privacy revision changed during this run')
             if read_only: raise ValueError('This run is read-only')
             memory = self.store.save_memory(dict(text=value, source=f'run:{run_id}', sourceIds=[m['id'] for m in self.store.list_messages(1)], provenance='inferred', confidence=0.7))
             memory_revision=self.store.revision()
