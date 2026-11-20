@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -60,6 +61,27 @@ def docker(*args):
     return subprocess.check_output(['docker',*args],text=True).strip()
 
 
+def export_snapshot(source, target):
+    """Export a completed native snapshot without Unix chmod on Windows shares.
+
+    The Windows directory ACL controls desktop access. Exclusive creation keeps
+    an existing export safe, and a failed copy removes only its own new file.
+    """
+    source=Path(source);target=Path(target)
+    created=False
+    try:
+        with target.open('xb') as output:
+            created=True
+            with source.open('rb') as reader:shutil.copyfileobj(reader,output)
+            output.flush();os.fsync(output.fileno())
+        digest=hashlib.sha256(target.read_bytes()).hexdigest()
+        if digest!=hashlib.sha256(source.read_bytes()).hexdigest():raise ValueError('Exported snapshot checksum mismatch')
+        return digest
+    except BaseException:
+        if created:target.unlink(missing_ok=True)
+        raise
+
+
 def native_directory(path):
     if sys.platform!='linux': raise ValueError('Run this command inside Linux/WSL, using a native local directory')
     path=Path(path).absolute()
@@ -106,10 +128,16 @@ def main():
     else:
         output_dir=Path(args.output_dir).absolute();output_dir.mkdir(parents=True,exist_ok=True)
         output=output_dir/('assistant-'+time.strftime('%Y%m%d-%H%M%S',time.gmtime())+'-'+uuid4().hex[:8]+'.sqlite')
+        # SQLite backup and private chmod run on native storage. Only the closed,
+        # standalone copy is exported to the desktop filesystem afterwards.
+        snapshots=native_directory(database/'snapshots')
         command+=['--mount','type=bind,src='+str(database)+',dst=/source',
-                  '--mount','type=bind,src='+str(output_dir)+',dst=/target',
+                  '--mount','type=bind,src='+str(snapshots)+',dst=/target',
                   '--entrypoint','python',args.image,'/opt/local-database.py','_copy','--source','/source/assistant.sqlite','--target','/target/'+output.name,'--allow-live']
     report=json.loads(docker(*command));report['path']=str(output)
+    if args.command=='snapshot':
+        native_copy=snapshots/output.name
+        if native_copy!=output:export_snapshot(native_copy,output)
     output.with_suffix('.manifest.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(report,indent=2))
 

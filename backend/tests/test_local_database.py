@@ -15,6 +15,16 @@ tools=importlib.util.module_from_spec(spec);spec.loader.exec_module(tools)
 
 
 class LocalDatabaseTests(unittest.TestCase):
+    def test_desktop_export_preserves_bytes_and_refuses_existing_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);source=root/'native.sqlite';target=root/'desktop.sqlite'
+            LocalStore(source).close()
+            digest=tools.export_snapshot(source,target)
+            self.assertEqual(source.read_bytes(),target.read_bytes())
+            self.assertEqual(len(digest),64)
+            with self.assertRaises(FileExistsError):tools.export_snapshot(source,target)
+            self.assertEqual(source.read_bytes(),target.read_bytes())
+
     def test_backup_preserves_real_records_fts_documents_and_source(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder); source=root/'source.sqlite'; target=root/'copy.sqlite'

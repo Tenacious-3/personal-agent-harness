@@ -110,7 +110,9 @@ sudo python3 scripts/local-database.py snapshot \
   --output-dir /mnt/d/projects/personal-agent-harness/.assistant/db-snapshots
 ```
 
-Snapshots include integrity/checksum manifests and use unique names. They do not
+Snapshots include integrity/checksum manifests and use unique names. A private
+native copy is retained in the database directory's `snapshots/` folder before
+export; the Windows destination uses its existing Windows directory ACL. They do not
 include workspace/browser/vault files or the separate encryption key and are
 **not a complete workspace backup**. Open the exported snapshot, not the active
 database, in a Windows desktop editor. Do not run a second app against the live
