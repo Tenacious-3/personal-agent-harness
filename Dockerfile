@@ -46,7 +46,7 @@ COPY --from=frontend-build /usr/local/bin/node /usr/local/bin/node
 COPY backend/tests /app/backend/tests
 COPY legacy/typescript/src/domain.ts /app/legacy/typescript/src/domain.ts
 COPY legacy/typescript/src/local/store.ts legacy/typescript/src/local/workflows.ts /app/legacy/typescript/src/local/
-COPY scripts/container-acceptance.py scripts/container-fixture.py /app/scripts/
+COPY scripts/container-acceptance.py scripts/container-fixture.py scripts/local-database.py /app/scripts/
 ENV PYTHONPATH=/app/backend HOME=/tmp/harness
 WORKDIR /test-work
 USER 10001:10001

@@ -1,0 +1,13 @@
+# Keep the live local database and its WAL/SHM siblings on the owner's drive.
+# The original state volume still owns credentials, artifacts and Chromium.
+# Set HARNESS_DATABASE_DIR to a native local filesystem directory before use.
+services:
+  app:
+    environment:
+      ASSISTANT_DATABASE_DIR: /data/database
+    volumes:
+      - type: bind
+        source: ${HARNESS_DATABASE_DIR:?Set HARNESS_DATABASE_DIR to a native local database directory}
+        target: /data/database
+        bind:
+          create_host_path: false

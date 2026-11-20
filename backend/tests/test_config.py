@@ -9,6 +9,16 @@ from harness.core.config import load_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_database_directory_is_explicit_and_keeps_other_state_separate(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder).resolve()
+            with patch.dict(os.environ,{},clear=True):
+                config=load_config(root)
+                self.assertEqual(config.database_path,root/'.assistant/assistant.sqlite')
+            with patch.dict(os.environ,{'ASSISTANT_DATABASE_DIR':'local-database'},clear=True):
+                config=load_config(root)
+                self.assertEqual(config.database_path,root/'local-database/assistant.sqlite')
+                self.assertEqual(config.data_dir,root/'.assistant')
     def test_default_root_is_independent_of_launch_directory(self):
         checkout = Path(__file__).resolve().parents[2]
         with patch.dict(os.environ, {}, clear=True):

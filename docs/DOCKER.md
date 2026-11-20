@@ -68,6 +68,57 @@ Normal container recreation retains that volume. Deleting the volume loses
 state; no cleanup command deleting application volumes is part of this guide.
 Do not mount the everyday browser profile or the owner's home directory.
 
+## Persistent local database directory
+
+For repeatable local testing, `compose.local.yaml` can bind-mount a stable
+database directory independently of the existing state volume. Both the real
+server and standalone runtime honor `ASSISTANT_DATABASE_DIR`; by default they
+continue using the original state directory. Credentials, artifacts and the
+dedicated browser profile remain in the named state volume.
+
+Run the following inside Linux/WSL. Use a **native persistent Linux filesystem**
+such as ext4 for the live database. A WSL filesystem can itself be backed by a
+VHDX on a local Windows drive. Do not put the active WAL database on a Windows
+shared `/mnt/c` or `/mnt/d` directory, a network share or a cloud-synced folder.
+SQLite's database, WAL and shared-memory siblings must stay together; see
+[SQLite WAL requirements](https://www.sqlite.org/wal.html).
+
+For an existing local app, preserve its original volume and migrate while it is
+stopped. The helper refuses an existing destination, checks integrity and table
+counts, and leaves the original database in place:
+
+```bash
+docker compose stop app
+sudo python3 scripts/local-database.py migrate \
+  --database-dir /var/lib/personal-agent-harness/database
+export HARNESS_DATABASE_DIR=/var/lib/personal-agent-harness/database
+docker compose -f compose.yaml -f compose.local.yaml up -d --no-build app
+```
+
+Build the updated image before migration. For an automatic machine-local
+override, copy `compose.local.yaml` to the ignored `compose.override.yaml` and
+set `HARNESS_DATABASE_DIR` in an ignored `.env` file. Then normal `docker compose`
+commands retain the mount. Keep using the override after migration: the original
+named volume's SQLite file is a rollback copy, not the current database.
+
+Inspect the live database through Linux/container tools. For desktop inspection,
+export a consistent standalone SQLite snapshot while the app is running:
+
+```bash
+sudo python3 scripts/local-database.py snapshot \
+  --database-dir /var/lib/personal-agent-harness/database \
+  --output-dir /mnt/d/projects/personal-agent-harness/.assistant/db-snapshots
+```
+
+Snapshots include integrity/checksum manifests and use unique names. A private
+native copy is retained in the database directory's `snapshots/` folder before
+export; the Windows destination uses its existing Windows directory ACL. They do not
+include workspace/browser/vault files or the separate encryption key and are
+**not a complete workspace backup**. Open the exported snapshot, not the active
+database, in a Windows desktop editor. Do not run a second app against the live
+directory. Machine-specific overrides, `.env`, databases and snapshots remain
+outside Git and image build inputs.
+
 ## Network and runtime boundaries
 
 - Host mode still binds only `127.0.0.1`. Only explicit `CONTAINER_MODE=true`

@@ -137,7 +137,7 @@ def create_app(config: Config | None = None, runtime_factory: Callable | None = 
         runtime = None
         try:
             from harness.persistence.store import LocalStore
-            store = LocalStore(config.data_dir / "assistant.sqlite")
+            store = LocalStore(config.database_path)
             store.claim_runtime_ownership()
             runtime = runtime_factory(config, store=store)
             app.state.runtime = runtime

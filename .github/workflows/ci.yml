@@ -83,4 +83,4 @@ jobs:
       - name: Build Python distribution
         run: uv build --package personal-assistant-harness-backend --out-dir dist/backend
       - name: Build and verify the local Docker runtime and acceptance images
-        run: python scripts/container-smoke.py --build
+        run: python scripts/container-smoke.py --build --bind-database

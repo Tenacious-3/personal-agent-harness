@@ -47,7 +47,7 @@ class Runtime:
         if config.model != 'gpt-6-luna': raise ValueError('Only gpt-6-luna is permitted')
         if any(type(n) is not int or n <= 0 for n in (config.daily_token_limit, config.run_token_reservation)):
             raise ValueError('Token limits must be positive integers')
-        self.store = store or LocalStore(config.data_dir / 'assistant.sqlite')
+        self.store = store or LocalStore(config.database_path)
         self.runner = runner or run_assistant
         self.browser = browser or BrowserService(config.data_dir / 'browser-profile', executable_path=config.browser_executable, channel=config.browser_channel)
         self.google = google or GoogleConnector(config.google_client_id, config.google_client_secret,
