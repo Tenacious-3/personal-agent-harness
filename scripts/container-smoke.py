@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+import tempfile
 import urllib.error
 import urllib.request
 import uuid
@@ -33,7 +34,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="personal-agent-harness:acceptance-ci")
     parser.add_argument("--build", action="store_true", help="Build both pinned images before testing")
+    parser.add_argument("--bind-database", action="store_true", help="Verify a separate native Linux database bind across recreation")
     options = parser.parse_args()
+    if options.bind_database and sys.platform!='linux':
+        parser.error('Run bind-database acceptance inside native Linux/WSL')
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,200}", options.image) or "@" in options.image:
         parser.error("Use a local image name/tag, not a digest reference")
     try:
@@ -60,6 +64,8 @@ def main():
     suffix = uuid.uuid4().hex[:16]
     container = "harness-container-smoke-" + suffix
     volume = "harness-container-state-" + suffix
+    bound_database=tempfile.TemporaryDirectory(prefix='harness-bind-database-') if options.bind_database else None
+    if bound_database: Path(bound_database.name).chmod(0o777)  # Isolated fixture data; app remains UID 10001.
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -92,16 +98,21 @@ def main():
                 time.sleep(.2)
 
     def start():
+        database_args=['--mount',f'type=bind,src={bound_database.name},dst=/database',
+                       '--env','ASSISTANT_DATABASE_DIR=/database'] if bound_database else []
         docker("run", "--detach", "--name", container, "--init", "--read-only", "--shm-size", "256m",
                "--publish", f"127.0.0.1:{port}:8787", "--mount", f"type=volume,src={volume},dst=/data/.assistant",
                "--tmpfs", "/tmp:rw,nosuid,size=268435456", "--cap-drop", "ALL",
                "--security-opt", "no-new-privileges:true", "--pids-limit", "512", "--memory", "2g",
                "--env", "HARNESS_TOKEN=" + TOKEN, "--env", "CREDENTIAL_KEY=" + SECRET,
-               "--env", "OPENAI_API_KEY=synthetic-container-no-network", options.image,
+               "--env", "OPENAI_API_KEY=synthetic-container-no-network", *database_args, options.image,
                "python", "-u", "/app/scripts/container-fixture.py", capture=True)
         wait_ready()
 
     def verify_persisted(memory_id, approval_id, schedule_id, document_id):
+        if bound_database:
+            assert (Path(bound_database.name)/'assistant.sqlite').is_file()
+            docker('exec',container,'python','-c',"from pathlib import Path; assert not Path('/data/.assistant/assistant.sqlite').exists()")
         assert any(item["id"] == memory_id for item in request("/api/memories")["memories"])
         assert len(request("/api/history")["messages"]) == 2
         document=request(f"/api/memory-documents/{document_id}")
@@ -160,6 +171,7 @@ def main():
             raise RuntimeError("Refusing to clean an unowned Docker fixture")
         docker("rm", "--force", container, capture=True, check=False)
         docker("volume", "rm", volume, capture=True, check=False)
+        if bound_database: bound_database.cleanup()
 
 
 if __name__ == "__main__":

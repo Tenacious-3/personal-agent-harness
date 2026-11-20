@@ -1,6 +1,7 @@
 """HTTP boundary and lifecycle tests; all state is confined to temp dirs."""
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -33,6 +34,18 @@ class FakeRuntime:
 
 
 class ServerTests(OfflineAsyncCase):
+    async def test_explicit_database_directory_is_used_and_survives_reopen(self):
+        config=replace(self.config,database_dir=self.root/'bound-database')
+        app=create_app(config,FakeRuntime)
+        async with app.router.lifespan_context(app):
+            store=FakeRuntime.instances[-1].store
+            memory=store.save_memory({'text':'Persistent database directory check','source':'user','provenance':'explicit'})
+            self.assertTrue(config.database_path.is_file())
+        reopened=create_app(config,FakeRuntime)
+        async with reopened.router.lifespan_context(reopened):
+            self.assertEqual(FakeRuntime.instances[-1].store.list_memories()[0]['id'],memory['id'])
+        self.assertTrue((self.root/'.assistant/assistant.sqlite').is_file())
+
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=Path.cwd())
         self.root = Path(self.tmp.name)

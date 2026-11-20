@@ -30,6 +30,11 @@ class Config:
     container_mode: bool = False
     allowed_hosts: tuple[str, ...] = ()
     mcp_trusted_loopback_urls: tuple[str, ...] = ()
+    database_dir: Path | None = None
+
+    @property
+    def database_path(self) -> Path:
+        return (self.database_dir or self.data_dir) / 'assistant.sqlite'
 
     @property
     def listen_host(self) -> str:
@@ -85,6 +90,7 @@ def load_config(root: Path | str | None = None) -> Config:
     return Config(serve_frontend=get('SERVE_FRONTEND', 'true').lower() == 'true',
                   frontend_dir=(root / get('FRONTEND_DIST_DIR', 'frontend/dist')).resolve(),
                   root=root, data_dir=(root / get('ASSISTANT_DATA_DIR', '.assistant')).resolve(), port=port,
+                  database_dir=(root / get('ASSISTANT_DATABASE_DIR')).resolve() if get('ASSISTANT_DATABASE_DIR') else None,
                   token=get('HARNESS_TOKEN'), api_key=get('OPENAI_API_KEY'),
                   google_client_id=get('GOOGLE_CLIENT_ID'), google_client_secret=get('GOOGLE_CLIENT_SECRET'),
                   encryption_secret=get('CREDENTIAL_KEY', get('HARNESS_TOKEN')),
