@@ -6,7 +6,8 @@ import { neutralTheme } from "@astryxdesign/theme-neutral/built";
 import { ApiError, createApi, type Item } from "../api/client";
 import { txt } from "../lib/format";
 import { session, setSession } from "../lib/session";
-import { type View } from "./navigation";
+import { createDraftStore, DraftContext } from "../lib/drafts";
+import { readDestination, workspaceUrl, type Navigate } from "./navigation";
 import { WorkspaceShell } from "./WorkspaceShell";
 import { Chat } from "../features/chat/Chat";
 import { Memory } from "../features/memory/Memory";
@@ -27,7 +28,22 @@ import { Evidence } from "../features/evidence/Evidence";
 
 export function App() {
   const [mode,setMode]=useState<"light"|"dark">(()=>document.documentElement.dataset.theme==="light"?"light":"dark");
-  const [view,setView]=useState<View>("Chat");
+  const [destination,setDestination]=useState(readDestination);
+  const {view,id,kind}=destination;
+  const setView: Navigate = (next, entity, sourceKind) => {
+    const url = workspaceUrl(next, entity, sourceKind);
+    if (window.location.pathname + window.location.hash !== url) window.history.pushState(null, "", url);
+    setDestination({ view: next, id: entity, kind: sourceKind });
+  };
+  useEffect(()=>{
+    const sync = () => setDestination(readDestination());
+    window.addEventListener("popstate", sync);
+    window.addEventListener("hashchange", sync);
+    return () => {
+      window.removeEventListener("popstate", sync);
+      window.removeEventListener("hashchange", sync);
+    };
+  },[]);
   const [token,setToken]=useState("");
   const tokenRef=useRef("");
   const generation=useRef(0);
@@ -36,16 +52,18 @@ export function App() {
   const [connecting,setConnecting]=useState(false);
   const [connectionError,setConnectionError]=useState("");
   const [draft,setDraft]=useState("");
+  const [workspaceDrafts,setWorkspaceDrafts]=useState(createDraftStore);
   const [runtime,setRuntime]=useState<Item>({});
   const api=useMemo(()=>{
     const apiGeneration=generation.current;
     return createApi(token,()=>{
       if(tokenRef.current!==token||generation.current!==apiGeneration)return;
       generation.current+=1;tokenRef.current="";
+      workspaceDrafts.close();setWorkspaceDrafts(createDraftStore(false));
       setSession("harness-token","");setToken("");setRuntime({});
       setConnectionError("Workspace token was rejected or changed. Reconnect your workspace.");
     });
-  },[token]);
+  },[token,workspaceDrafts]);
   useEffect(()=>{
     try{localStorage.setItem("harness-color-mode",mode);}catch{}
     document.documentElement.dataset.theme=mode;
@@ -59,11 +77,16 @@ export function App() {
     try{
       const status=await createApi(candidate)("/status");
       if(attempt!==generation.current)return;
+      if(session("harness-token")!==candidate){
+        workspaceDrafts.close();setWorkspaceDrafts(createDraftStore(false));
+      }
       tokenRef.current=candidate;setSession("harness-token",candidate);
       setRuntime(status);setToken(candidate);setDraft("");
     }catch(cause){
       if(attempt!==generation.current)return;
-      if(cause instanceof ApiError&&cause.status===401)setSession("harness-token","");
+      if(cause instanceof ApiError&&cause.status===401){
+        setSession("harness-token","");workspaceDrafts.close();setWorkspaceDrafts(createDraftStore(false));
+      }
       else setDraft(candidate);
       setConnectionError(cause instanceof ApiError?cause.message:"Cannot reach your assistant. Check that the local server is running, then try again.");
     }finally{connectLock.current=false;setConnecting(false);}
@@ -75,6 +98,7 @@ export function App() {
   const connect=()=>{void verifyConnection(draft.trim());};
   const disconnect=()=>{
     generation.current+=1;tokenRef.current="";setSession("harness-token","");
+    workspaceDrafts.close();setWorkspaceDrafts(createDraftStore(false));
     setToken("");setRuntime({});setConnectionError("");
   };
   return <Theme theme={neutralTheme} mode={mode}>
@@ -96,25 +120,26 @@ export function App() {
         </div>
       </section>
       <span className="login-footer">Your workspace. Your context. Your control.</span>
-    </main>:<WorkspaceShell api={api} runtime={runtime} view={view} onNavigate={setView} mode={mode} onModeChange={setMode} onDisconnect={disconnect}>
+    </main>:<DraftContext.Provider value={workspaceDrafts}><WorkspaceShell api={api} runtime={runtime} view={view} onNavigate={setView} mode={mode} onModeChange={setMode} onDisconnect={disconnect}>
+      {destination.error&&<div role="alert" className="error">{destination.error}</div>}
       {view==="Chat"&&<Chat api={api} model={txt(runtime.model)||"GPT-6 Luna"}/>}
       <div className={view==="Chat"?"workspace-hidden":"workspace-page-content"}>
         {view==="Goals"&&<Goals api={api}/>}
         {view==="Memory"&&<Memory api={api}/>}
-        {view==="History"&&<HistoryExplorer api={api}/>}
+        {view==="History"&&<HistoryExplorer api={api} sourceId={id} sourceKind={kind} navigate={setView}/>}
         {view==="People"&&<People api={api}/>}
         {view==="Repairs"&&<Repairs api={api}/>}
         {view==="Evidence"&&<Evidence api={api}/>}
         {view==="Schedules"&&<Schedules api={api}/>}
-        {view==="Tasks"&&<Tasks api={api} navigate={setView}/>}
-        {view==="Workflows"&&<Workflows api={api}/>}
+        {view==="Tasks"&&<Tasks api={api} navigate={setView} selected={id}/>}
+        {view==="Workflows"&&<Workflows api={api} workflowId={id} navigate={setView}/>}
         {view==="Browser"&&<Browser api={api} token={token} navigate={setView}/>}
-        {view==="Approvals"&&<Approvals api={api}/>}
+        {view==="Approvals"&&<Approvals api={api} recordId={id} recordKind={kind} navigate={setView}/>}
         {view==="Inbox"&&<Inbox api={api} navigate={setView}/>}
         {view==="Files"&&<Files api={api}/>}
         {view==="Connections"&&<Connections api={api} runtime={runtime} navigate={setView}/>}
-        {view==="Activity"&&<Activity api={api}/>}
+        {view==="Activity"&&<Activity api={api} navigate={setView}/>}
       </div>
-    </WorkspaceShell>}
+    </WorkspaceShell></DraftContext.Provider>}
   </Theme>;
 }

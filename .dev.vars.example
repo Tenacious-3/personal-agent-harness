@@ -7,6 +7,7 @@ LOCAL_PORT=8787
 # Optional static UI adapter; disable when using the Vite development server.
 SERVE_FRONTEND=true
 FRONTEND_DIST_DIR=frontend/dist
+# Set to 0 for uncapped daily usage. A positive value caps daily admission.
 DAILY_TOKEN_LIMIT=200000
 RUN_TOKEN_RESERVATION=100000
 # Set these only after creating a Google OAuth web client.

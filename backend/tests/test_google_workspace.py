@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 
 from harness.core.config import Config
+from harness.integrations.failures import ConnectorFailure
 from harness.integrations.google import GMAIL_READ_SCOPE, SHEETS_SCOPE, MAX_RESPONSE_BYTES
 from harness.integrations.google_sheets import bounded_range, bounded_values, registration
 from tests.google_fixture import ACCOUNT, SHEET_ID, GoogleFixture
@@ -174,19 +175,19 @@ class GoogleWorkspaceTests(OfflineAsyncCase):
         auth = self.google.begin_auth()
         await self.google.complete_auth("synthetic-code", auth["state"])
         for proposal in proposals:
-            self.assertEqual((await self.approve(proposal))["status"], "uncertain")
+            self.assertEqual((await self.approve(proposal))["status"], "failed")
         self.assertEqual(self.fixture.writes, [])
 
     async def test_registration_removal_and_discovery_revocation_block_pending_updates(self):
         sheet = await self.register()
         registered = await self.runtime.propose_action("sheets.update", {"sheetId": sheet["id"], "values": [["Test"]]}, "Registered update")
         await self.sheets.remove(sheet["id"])
-        self.assertEqual((await self.approve(registered))["status"], "uncertain")
+        self.assertEqual((await self.approve(registered))["status"], "failed")
         await self.sheets.discovery(True)
         found = (await self.sheets.search("Budget"))["sheets"][0]
         discovered = await self.runtime.propose_action("sheets.update", {"sheetId": found["id"], "range": "Budget!A1:B2", "values": [["Test"]]}, "Discovered update")
         await self.sheets.discovery(False)
-        self.assertEqual((await self.approve(discovered))["status"], "uncertain")
+        self.assertEqual((await self.approve(discovered))["status"], "failed")
         self.assertEqual(self.fixture.writes, [])
 
     async def test_refresh_preserves_binding_and_scope_revocation_blocks_write(self):
@@ -199,7 +200,7 @@ class GoogleWorkspaceTests(OfflineAsyncCase):
         self.fixture.seed(self.config, expires_at=0)
         self.fixture.scopes = GMAIL_READ_SCOPE
         proposal = await self.runtime.propose_action("sheets.update", {"sheetId": sheet["id"], "values": [["Blocked"]]}, "Revoked test")
-        self.assertEqual((await self.approve(proposal))["status"], "uncertain")
+        self.assertEqual((await self.approve(proposal))["status"], "failed")
         self.assertEqual(len(self.fixture.writes), 1)
 
     async def test_read_only_agents_and_arbitrary_endpoints_cannot_write(self):
@@ -243,7 +244,34 @@ class GoogleWorkspaceTests(OfflineAsyncCase):
             old = self.google._client
             self.google._client = client
             try:
-                with self.assertRaises(RuntimeError): await self.google.list_mail()
-                with self.assertRaisesRegex(RuntimeError, "1 MiB"): await self.google.list_mail()
+                with self.assertRaises(ConnectorFailure): await self.google.list_mail()
+                with self.assertRaisesRegex(ConnectorFailure, "1 MiB"): await self.google.list_mail()
             finally: self.google._client = old
         self.assertEqual(len(requests), 2)
+
+    async def test_reads_retry_throttle_and_outage_but_writes_never_retry(self):
+        requests = []
+        outcomes = iter((429, 200, 503, 200, 401, 403, 429))
+
+        async def handler(request):
+            self.assertTrue(self.google._connection_lock.locked())
+            requests.append(request.method)
+            status = next(outcomes)
+            return httpx.Response(status, json={'messages': []} if status == 200 else {}, headers={'Retry-After': '0'})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            old = self.google._client
+            self.google._client = client
+            try:
+                self.assertEqual((await self.google.list_mail())['messages'], [])
+                self.assertEqual((await self.google.list_mail())['messages'], [])
+                for category in ('authorization', 'permission'):
+                    with self.assertRaises(ConnectorFailure) as exc:
+                        await self.google.list_mail()
+                    self.assertEqual(exc.exception.category, category)
+                with self.assertRaises(ConnectorFailure) as exc:
+                    await self.google.send_mail({'to': 'test@example.invalid', 'subject': 'Fixture', 'body': 'Fixture'})
+                self.assertEqual(exc.exception.category, 'throttled')
+            finally:
+                self.google._client = old
+        self.assertEqual(requests, ['GET'] * 6 + ['POST'])

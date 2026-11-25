@@ -79,12 +79,14 @@ export function Area({
   onChange,
   rows = 4,
   maxLength = 12000,
+  disabled = false,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   rows?: number;
   maxLength?: number;
+  disabled?: boolean;
 }) {
   return (
     <label className="native-field">
@@ -95,6 +97,7 @@ export function Area({
         onChange={(event) => onChange(event.target.value)}
         rows={rows}
         maxLength={maxLength}
+        disabled={disabled}
       />
     </label>
   );

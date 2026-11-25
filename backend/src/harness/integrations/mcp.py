@@ -25,6 +25,8 @@ from mcp.client.streamable_http import streamable_http_client
 
 from harness.integrations.browser import validate_browser_url, is_public_browser_address
 from harness.integrations.credentials import CredentialCipher
+from harness.core.utils import ActionPreflightError, safe_error
+from harness.integrations.failures import ConnectorFailure, transport_failure
 
 MAX_RESPONSE = 1024 * 1024
 TIMEOUT = 20
@@ -210,9 +212,12 @@ class MCPRegistry:
                             async with ClientSession(reader, writer, read_timeout_seconds=timedelta(seconds=TIMEOUT)) as session:
                                 await session.initialize()
                                 yield session
-        except Exception:
+        except Exception as error:
             # Remote error text may echo credentials. Only fixed local errors escape.
-            raise ValueError('MCP operation failed; verify endpoint, authorization and tool availability') from None
+            failure = transport_failure('MCP', error)
+            if failure:
+                raise ConnectorFailure(failure.category, f'MCP operation failed. {failure}') from None
+            raise ConnectorFailure('rejected', 'MCP operation failed; verify endpoint, authorization and tool availability') from None
         finally:
             for logger in loggers: logger.removeFilter(redactor)
 
@@ -302,10 +307,13 @@ class MCPRegistry:
 
     async def execute_write(self, payload):
         if not isinstance(payload, dict) or set(payload) != {'id', 'connectionId', 'tool', 'fingerprint', 'arguments'}:
-            raise ValueError('Invalid bound MCP approval')
+            raise ActionPreflightError('Invalid bound MCP approval')
         async with self.lock:
-            connection = self._load(payload['id'])
-            current = self._bound(connection, payload['tool'], payload['arguments'], 'approval')
-            if current != payload: raise ValueError('MCP connection or grant changed; request a fresh approval')
+            try:
+                connection = self._load(payload['id'])
+                current = self._bound(connection, payload['tool'], payload['arguments'], 'approval')
+                if current != payload: raise ValueError('MCP connection or grant changed; request a fresh approval')
+            except (ValueError, RuntimeError) as error:
+                raise ActionPreflightError(safe_error(error)) from None
             return await self._call(connection, current)
 

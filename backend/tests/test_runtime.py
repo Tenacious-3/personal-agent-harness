@@ -57,6 +57,73 @@ class RuntimeTests(OfflineAsyncCase):
         self.assertEqual(self.runtime.store.list_usage()[0]['inputTokens'], 12)
         self.assertTrue((self.root / 'workspace/memory/MEMORY.md').exists())
 
+    async def test_approval_lifecycle_uses_retained_task_approvals(self):
+        store = self.runtime.store
+        task = store.create_task({'prompt': 'Run task with retained approval'})
+        payload = {'name': 'retained', 'content': '# Test procedure'}
+        approval = await self.runtime.propose_action('skill.save', payload, 'Review procedure', task['id'])
+        for _ in range(1005):
+            store.create_approval({'kind': 'skill.save', 'payload': {}, 'summary': 'Unrelated approval'})
+        reused = await self.runtime.propose_action('skill.save', dict(reversed(list(payload.items()))),
+                                                   'Review procedure again', task['id'])
+        self.assertEqual(reused['id'], approval['id'])
+        await self.runtime.run_task(task)
+        self.assertEqual(store.get_task(task['id'])['status'], 'waiting_approval')
+        self.runtime.resume_task(task['id'])
+        self.assertEqual(store.get_task(task['id'])['status'], 'waiting_approval')
+        self.assertFalse((self.root / 'workspace/skills/retained').exists())
+        self.runtime.cancel_task(task['id'])
+        self.assertEqual(store.get_approval(approval['id'])['status'], 'rejected')
+
+    async def test_old_uncertain_approval_blocks_failed_task_retry(self):
+        store = self.runtime.store
+        task = store.create_task({'prompt': 'Failed task with uncertain delivery'})
+        approval = store.create_approval({'taskId': task['id'], 'kind': 'skill.save',
+                                          'payload': {}, 'summary': 'Prior action'})
+        store.decide_approval(approval['id'], 'approved', approval['digest'])
+        store.claim_execution(approval['id'])
+        store.mark_action_uncertain(approval['id'], 'Interrupted delivery')
+        store.update_task(task['id'], {'status': 'running'})
+        store.update_task(task['id'], {'status': 'failed'})
+        for _ in range(1005):
+            store.create_approval({'kind': 'skill.save', 'payload': {}, 'summary': 'Unrelated approval'})
+        status, error = await self.request(f"/tasks/{task['id']}/retry", {})
+        self.assertEqual(status, 400)
+        self.assertIn('Reconcile', error['error'])
+        self.assertEqual(store.get_task(task['id'])['status'], 'failed')
+
+    async def test_delegation_and_cancellation_use_retained_graph(self):
+        store = self.runtime.store
+        parent = store.create_task({'prompt': 'Parent'})
+        children = [await self.runtime.operate('delegate', {'prompt': f'Child {i}'}, parent) for i in range(3)]
+        grandchild = store.create_task({'prompt': 'Existing nested task', 'parentId': children[1]['id']})
+        store.update_task(children[0]['id'], {'status': 'running'})
+        store.update_task(children[0]['id'], {'status': 'completed', 'result': 'Retained child result'})
+        for _ in range(1005):
+            store.create_task({'prompt': 'Unrelated task'})
+        with self.assertRaisesRegex(ValueError, 'Subtask limit'):
+            await self.runtime.operate('delegate', {'prompt': 'Fourth child'}, parent)
+
+        async def runner(config, prompt, context, caps):
+            self.assertIn('Retained child result', prompt)
+            caps.on_usage(5, 5)
+            return 'Consumed old child result'
+
+        self.runtime.runner = runner
+        await self.runtime.run_task(parent)
+        self.assertEqual(store.get_task(parent['id'])['result'], 'Consumed old child result')
+        active = asyncio.create_task(asyncio.sleep(60))
+        self.runtime.active[grandchild['id']] = active
+        try:
+            self.runtime.cancel_task(parent['id'])
+            with self.assertRaises(asyncio.CancelledError):
+                await active
+        finally:
+            self.runtime.active.pop(grandchild['id'], None)
+        self.assertEqual(store.get_task(children[0]['id'])['status'], 'completed')
+        for task in [*children[1:], grandchild]:
+            self.assertEqual(store.get_task(task['id'])['status'], 'cancelled')
+
     async def test_provider_usage_details_are_recorded_without_changing_budget_counts(self):
         async def runner(config, prompt, context, caps):
             caps.on_usage(120, 9)
@@ -80,6 +147,31 @@ class RuntimeTests(OfflineAsyncCase):
         self.assertEqual(len(self.runtime.store.list_notifications()), 1)
         self.assertEqual(self.runtime.store.list_schedules()[0]['status'], 'completed')
 
+    async def test_explicit_readiness_checks_report_local_degradation_and_budget(self):
+        self.runtime.config.browser_executable = str(self.root / 'missing-browser')
+        self.runtime.store.set_setting('memoryProjectionStale', True)
+        before = len(self.runtime.store.list_usage())
+        response = await self.runtime.dispatch('GET', '/health')
+        self.assertEqual(response.status_code, 200)
+        status, report = await self.request('/readiness', {'check': 'local'})
+        self.assertEqual(status, 200, report)
+        self.assertEqual(report['checks']['database']['status'], 'ready')
+        self.assertEqual(report['checks']['browser']['status'], 'unavailable')
+        self.assertEqual(report['checks']['projection']['status'], 'degraded')
+        self.assertEqual(len(self.runtime.store.list_usage()), before)
+        self.runtime.config.daily_token_limit = 1
+        _, blocked = await self.request('/readiness', {'check': 'model'})
+        self.assertEqual(blocked['checks']['model']['status'], 'degraded')
+        self.assertEqual(len(self.runtime.store.list_usage()), before)
+        self.runtime.config.daily_token_limit = 100000
+        _, verified = await self.request('/readiness', {'check': 'model'})
+        self.assertEqual(verified['checks']['model']['status'], 'ready')
+        self.assertEqual(len(self.runtime.store.list_usage()), before + 1)
+        self.runtime.config.daily_token_limit = 0
+        status, chat = await self.request('/chat', {'message': 'Verify uncapped chat'})
+        self.assertEqual(status, 200, chat)
+        self.assertEqual(len(self.runtime.store.list_usage()), before + 2)
+
     async def test_old_queued_task_runs_after_more_than_500_completed_records(self):
         old = self.runtime.store.create_task({'prompt': 'Old work must not disappear'})
         for index in range(501):
@@ -87,6 +179,16 @@ class RuntimeTests(OfflineAsyncCase):
             self.runtime.store.update_task(newer['id'], {'status': 'running'})
             self.runtime.store.update_task(newer['id'], {'status': 'completed', 'result': 'Done'})
         self.assertNotIn(old['id'], {t['id'] for t in self.runtime.store.list_tasks(500)})
+        status, runtime_status = await self.request('/status', method='GET')
+        self.assertEqual(status, 200, runtime_status)
+        self.assertEqual(runtime_status['activity']['queuedTasks'], 1)
+        response = await self.runtime.dispatch('GET', '/api/tasks', query={'status': 'queued'})
+        page = json.loads(response.body)
+        self.assertEqual(response.status_code, 200, page)
+        self.assertEqual([task['id'] for task in page['tasks']], [old['id']])
+        self.assertEqual(page['counts']['completed'], 501)
+        result = await self.runtime.operate('tasks_read', {'status': 'queued'}, read_only=True)
+        self.assertEqual([task['id'] for task in result['tasks']], [old['id']])
         await self.pump(2)
         self.assertEqual(self.runtime.store.get_task(old['id'])['status'], 'completed')
         self.assertEqual(self.runtime.store.get_task(old['id'])['attempts'], 1)
@@ -128,12 +230,25 @@ class RuntimeTests(OfflineAsyncCase):
         await self.request(f"/approvals/{rejected['id']}/decision", {'decision': 'rejected', 'expectedDigest': rejected['digest']})
         self.assertEqual(self.browser.click.await_count, 1)
 
-    async def test_browser_changed_page_and_uncertain_write_do_not_repeat(self):
+    async def test_browser_preflight_rejects_without_dispatch_and_transport_failure_remains_uncertain(self):
         approval = await self.runtime.propose_action('browser.click', {'tabId': 'tab', 'selector': '#x'}, 'Reviewed click')
         self.browser.tabs.return_value = [{'id': 'tab', 'url': 'https://playwright.dev/changed'}]
         self.runtime.store.decide_approval(approval['id'], 'approved', approval['digest'])
         result = await self.runtime.execute_action(approval)
-        self.assertEqual(result['status'], 'uncertain'); self.assertEqual(self.browser.click.await_count, 0)
+        self.assertEqual(result['status'], 'failed'); self.assertEqual(self.browser.click.await_count, 0)
+        self.assertIn('stopped before delivery', result['error'])
+        self.assertEqual(self.runtime.store.list_events()[0]['type'], 'action.preflight-rejected')
+        approval = await self.runtime.propose_action('browser.click', {'tabId': 'tab', 'selector': '#x'}, 'Second reviewed click')
+        self.runtime.store.decide_approval(approval['id'], 'approved', approval['digest'])
+        self.browser.status.return_value = {'manualControl': True}
+        result = await self.runtime.execute_action(approval)
+        self.assertEqual(result['status'], 'failed'); self.assertEqual(self.browser.click.await_count, 0)
+        self.browser.status.return_value = {'manualControl': False}
+        approval = await self.runtime.propose_action('browser.click', {'tabId': 'tab', 'selector': '#x'}, 'Third reviewed click')
+        self.runtime.store.decide_approval(approval['id'], 'approved', approval['digest'])
+        self.browser.click.side_effect = TimeoutError('Response lost')
+        result = await self.runtime.execute_action(approval)
+        self.assertEqual(result['status'], 'uncertain'); self.assertEqual(self.browser.click.await_count, 1)
         self.assertEqual((await self.request('/tasks', {'prompt': 'Unrelated task'}))[0], 202)
 
     async def test_workflow_join_parallel_results_and_one_final_receipt(self):

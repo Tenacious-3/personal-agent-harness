@@ -3,22 +3,42 @@ import { Button } from "../../components/controls";
 import { type Api, type Item } from "../../api/client";
 import { text, rows } from "../../lib/knowledge";
 import { useData } from "../../hooks/useData";
+import { useResource } from "../../hooks/useResource";
 import { ErrorNotice } from "../../components/ErrorNotice";
+import type { Navigate } from "../../app/navigation";
 
 const kindLabel = (kind: unknown) => {
   const name = text(kind);
   return ({ message: "Conversation", task: "Task / specialist", workflow: "Workflow", memory: "Saved memory", document: "Memory document", action: "Completed action", tool: "MCP tool result" } as Record<string, string>)[name] || name;
 };
 
-export function HistoryExplorer({ api }: { api: Api }) {
+function OriginalSource({ api, id, kind, close }: { api: Api; id: string; kind: string; close: () => void }) {
+  const source = useResource(api, `/recall/item?${new URLSearchParams({ kind, id })}`);
+  const selected = source.data;
+  return <section className="section-card recall-source" aria-label="Original source">
+    <div className="section-heading">
+      <div><div className="eyebrow">{kindLabel(kind)}</div><h2>{text(selected.title) || "Original source"}</h2></div>
+      <Button label="Close source" variant="secondary" onClick={close} />
+    </div>
+    <ErrorNotice value={source.error} />
+    {source.loading && <p role="status">Loading source…</p>}
+    {selected.id === id && <>
+      <p className="section-description">Saved {new Date(Number(selected.createdAt)).toLocaleString()}</p>
+      <pre className="break-text">{text(selected.content)}</pre>
+      {selected.truncated === true && <p className="section-description">Showing the first 12,000 characters of this source.</p>}
+      <small>Source reference: {text(selected.kind)}:{text(selected.id)}</small>
+    </>}
+  </section>;
+}
+
+export function HistoryExplorer({ api, sourceId, sourceKind, navigate }: { api: Api; sourceId?: string; sourceKind?: string; navigate: Navigate }) {
   const state = useData(api, "/history/index");
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<Item | null>(null);
-  const [selected, setSelected] = useState<Item | null>(null);
   const [filter, setFilter] = useState("all");
   const [searchedQuery, setSearchedQuery] = useState("");
   const search = (semantic = false) => void state.run(async () => {
-    setSelected(null);
+    if (sourceId) navigate("History");
     setResult(null);
     setFilter("all");
     const response = await api(semantic ? "/history/search" : "/recall/search", { query: query.trim(), ...(semantic ? { semantic: true } : {}) });
@@ -49,18 +69,7 @@ export function HistoryExplorer({ api }: { api: Api }) {
           <small className="section-description">Keyword search stays local and uses no model calls. Search by meaning searches conversations only and may use up to two extra model calls.</small>
         </form>
       </section>
-      {selected && (
-        <section className="section-card recall-source" aria-label="Original source">
-          <div className="section-heading">
-            <div><div className="eyebrow">{kindLabel(selected.kind)}</div><h2>{text(selected.title) || "Original source"}</h2></div>
-            <Button label="Close source" variant="secondary" onClick={() => setSelected(null)} />
-          </div>
-          <p className="section-description">Saved {new Date(Number(selected.createdAt)).toLocaleString()}</p>
-          <pre className="break-text">{text(selected.content)}</pre>
-          {selected.truncated === true && <p className="section-description">Showing the first 12,000 characters of this source.</p>}
-          <small>Source reference: {text(selected.kind)}:{text(selected.id)}</small>
-        </section>
-      )}
+      {sourceId && <OriginalSource key={`${sourceKind}:${sourceId}`} api={api} id={sourceId} kind={sourceKind || ""} close={() => navigate("History")} />}
       {result && (
         <section className="record-list" aria-label="Search results" aria-live="polite">
           <div className="recall-results-heading">
@@ -80,10 +89,7 @@ export function HistoryExplorer({ api }: { api: Api }) {
                 <h3>{text(item.title)}</h3>
                 <p className="break-text">{text(item.excerpt)}</p>
               </div>
-              <Button label="Open source" variant="secondary" isDisabled={state.busy} onClick={() => void state.run(async () => {
-                setSelected(null);
-                setSelected(await api(`/recall/item?kind=${encodeURIComponent(text(item.kind))}&id=${encodeURIComponent(text(item.id))}`));
-              })} />
+              <Button label="Open source" variant="secondary" isDisabled={state.busy} onClick={() => navigate("History", text(item.id), text(item.kind))} />
             </article>
           ))}
           {!filtered.length && <div className="section-card"><h3>No matches yet</h3><p>Try a project name or a shorter phrase. Only content retained in this workspace can be found.</p></div>}

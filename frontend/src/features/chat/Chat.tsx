@@ -3,8 +3,10 @@ import { Button } from "../../components/controls";
 import { type Api, type Item } from "../../api/client";
 import { txt, list, obj } from "../../lib/format";
 import { Feedback } from "../../components/ui";
+import { useDraft } from "../../lib/drafts";
 
 const selectionKey = "assistant.currentChat";
+const activeTurn = (turn: Item | null) => turn?.status === "queued" || turn?.status === "running";
 function savedSelection() {
   try { return sessionStorage.getItem(selectionKey) || ""; } catch { return ""; }
 }
@@ -17,10 +19,12 @@ export function Chat({ api, model }: { api: Api; model: string }) {
   const [archived, setArchived] = useState(false);
   const [revision, setRevision] = useState(0);
   const [loadingSessions, setLoadingSessions] = useState(true);
-  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [loadedSelection, setLoadedSelection] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [input, setInput] = useState("");
+  const draft = useDraft(`chat:${selected}`);
+  const requestDraft = useDraft(`chat-request:${selected}`);
+  const input = draft.value ?? "";
   const [search, setSearch] = useState("");
   const [chatsOpen, setChatsOpen] = useState(false);
   const [copied, setCopied] = useState("");
@@ -29,14 +33,25 @@ export function Chat({ api, model }: { api: Api; model: string }) {
   const [hasMore, setHasMore] = useState(false);
   const [nextBefore, setNextBefore] = useState("");
   const [context, setContext] = useState<Item | null>(null);
+  const [turn, setTurn] = useState<Item | null>(null);
+  const [refreshMessages, setRefreshMessages] = useState(0);
   const end = useRef<HTMLDivElement>(null);
   const conversation = useRef<HTMLDivElement>(null);
   const operation = useRef(false);
   const generation = useRef(0);
   const scrollToEnd = useRef(true);
   const current = sessions.find((session) => session.id === selected);
-  const loading = loadingSessions || loadingMessages;
+  const loading = loadingSessions || Boolean(selected && loadedSelection !== selected);
   const disabled = busy || loading;
+  const preparingReply = turn?.sessionId === selected && activeTurn(turn);
+  const editDraft = (value?: string) => {
+    draft.write(value || undefined);
+    requestDraft.write();
+  };
+
+  useEffect(() => {
+    if (requestDraft.value && turn?.sessionId === selected && turn.id === requestDraft.value) editDraft();
+  }, [selected, turn?.id, turn?.sessionId, requestDraft.value]);
 
   useEffect(() => {
     const version = ++generation.current;
@@ -68,28 +83,51 @@ export function Chat({ api, model }: { api: Api; model: string }) {
   }, [api, archived, revision]);
 
   useEffect(() => {
-    let stale = false;
     setMessages([]);
     setContext(null);
+    setTurn(null);
     setHasMore(false);
     setRenaming(false);
-    setInput("");
     setCopied("");
-    if (!selected) { setLoadingMessages(false); return; }
+    setLoadedSelection("");
+    if (!selected) return;
     try { sessionStorage.setItem(selectionKey, selected); } catch { /* Storage can be unavailable. */ }
-    setLoadingMessages(true);
     scrollToEnd.current = true;
-    api(`/chat-sessions/${encodeURIComponent(selected)}/messages`)
-      .then((data) => {
+  }, [api, selected]);
+
+  useEffect(() => {
+    if (!selected) return;
+    let stale = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let tracking = false;
+    const load = async () => {
+      try {
+        const data = await api(`/chat-sessions/${encodeURIComponent(selected)}/messages`);
         if (stale) return;
+        const latest = data.latestTurn ? obj(data.latestTurn) : null;
+        setTurn(latest);
+        setContext(latest?.context ? obj(latest.context) : null);
         setMessages(list(data, "messages"));
         setHasMore(data.hasMore === true);
         setNextBefore(txt(data.nextBefore));
-      })
-      .catch((reason: unknown) => { if (!stale) setError(reason instanceof Error ? reason.message : String(reason)); })
-      .finally(() => { if (!stale) setLoadingMessages(false); });
-    return () => { stale = true; };
-  }, [api, selected]);
+        const session = obj(data.session);
+        setSessions((previous) => previous.map((item) => item.id === session.id ? session : item));
+        tracking = activeTurn(latest);
+      } catch (reason) {
+        if (!stale) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+          tracking = true;
+        }
+      } finally {
+        if (!stale) {
+          setLoadedSelection(selected);
+          if (tracking) timer = setTimeout(() => void load(), 700);
+        }
+      }
+    };
+    void load();
+    return () => { stale = true; clearTimeout(timer); };
+  }, [api, selected, refreshMessages]);
 
   useEffect(() => {
     if (scrollToEnd.current) end.current?.scrollIntoView({ block: "end", behavior: "smooth" });
@@ -108,21 +146,24 @@ export function Chat({ api, model }: { api: Api; model: string }) {
   };
   const send = () => {
     const message = input.trim();
-    if (!message || !selected || archived) return;
+    if (!message || !selected || archived || preparingReply) return;
     void run(async (valid) => {
-      const result = await api("/chat", { message, sessionId: selected });
+      const requestId = requestDraft.value ?? crypto.randomUUID();
+      requestDraft.write(requestId);
+      const accepted = await api("/chat-turns", { message, sessionId: selected, requestId });
       if (!valid()) return;
-      setInput("");
-      setContext(obj(result.context));
-      const page = await api(`/chat-sessions/${encodeURIComponent(selected)}/messages`);
-      if (!valid()) return;
+      editDraft();
       scrollToEnd.current = true;
-      setMessages(list(page, "messages"));
-      setHasMore(page.hasMore === true);
-      setNextBefore(txt(page.nextBefore));
-      setRevision((value) => value + 1);
+      setTurn(accepted);
+      setRefreshMessages((value) => value + 1);
     });
   };
+  const cancelReply = () => void run(async (valid) => {
+    const cancelled = await api(`/chat-turns/${encodeURIComponent(txt(turn?.id))}/cancel`, {});
+    if (!valid()) return;
+    setTurn(cancelled);
+    setRefreshMessages((value) => value + 1);
+  });
   const newChat = () => void run(async (valid) => {
     const session = await api("/chat-sessions", {});
     if (!valid()) return;
@@ -197,10 +238,11 @@ export function Chat({ api, model }: { api: Api; model: string }) {
           <div className="chat-title"><span className="chat-title-symbol" aria-hidden="true">✳</span><div><h2>{txt(current?.title) || (archived ? "Archived chats" : "Main chat")}</h2><span>{archived ? "Archived conversation" : "Your personal workspace"}</span></div></div>
           <div className="chat-controls">
             <button type="button" disabled={disabled || !current} onClick={() => { setTitle(txt(current?.title)); setRenaming(true); }}>Rename chat</button>
-            <button type="button" disabled={disabled || !current} onClick={() => updateSession({ archived: !archived })}>{archived ? "Restore chat" : "Archive chat"}</button>
+            <button type="button" disabled={disabled || !current || preparingReply} onClick={() => updateSession({ archived: !archived })}>{archived ? "Restore chat" : "Archive chat"}</button>
           </div>
         </div>
         <Feedback loading={loading} error={error} notice={!modelConfigured ? "Set up your model API key in the local workspace configuration, then restart the server to send messages." : undefined} />
+        {draft.warning && <Feedback notice={draft.warning} />}
         {renaming && <form className="chat-rename" onSubmit={(event) => { event.preventDefault(); if (title.trim()) updateSession({ title: title.trim() }); }}>
           <label className="native-field">Chat title<input aria-label="Chat title" maxLength={100} value={title} disabled={disabled} onChange={(event) => setTitle(event.target.value)} autoFocus /></label>
           <button type="submit" disabled={disabled || !title.trim()}>Save title</button>
@@ -208,11 +250,11 @@ export function Chat({ api, model }: { api: Api; model: string }) {
         </form>}
         <div className="conversation" ref={conversation} role="log" aria-label="Conversation" aria-live="polite">
           <div className="conversation-inner">
-            {hasMore && <button type="button" className="load-older" disabled={disabled} onClick={older}>Load older messages</button>}
+            {hasMore && <button type="button" className="load-older" disabled={disabled || preparingReply} onClick={older}>Load older messages</button>}
             {!messages.length && !loading ? <div className="chat-empty">
               <span aria-hidden="true">✳</span><h3>{archived ? "Archived conversation" : "What are we working on?"}</h3>
               <p>{archived ? "Restore this chat to continue the conversation." : "Bring an idea, a question, or a task. Let's make progress."}</p>
-              {!archived && <div className="chat-suggestions">{["Help me plan my week", "What do you remember about me?", "Help me break down a goal"].map((prompt) => <button key={prompt} disabled={disabled || !selected} onClick={() => setInput(prompt)}>{prompt}</button>)}</div>}
+              {!archived && <div className="chat-suggestions">{["Help me plan my week", "What do you remember about me?", "Help me break down a goal"].map((prompt) => <button key={prompt} disabled={disabled || !selected} onClick={() => editDraft(prompt)}>{prompt}</button>)}</div>}
             </div> : messages.map((message, index) => (
               <article className={`message ${message.role === "user" ? "user-message" : "assistant-message"}`} key={txt(message.id) || index}>
                 <span className="message-avatar">{message.role === "user" ? "Y" : "✳"}</span>
@@ -221,15 +263,18 @@ export function Chat({ api, model }: { api: Api; model: string }) {
                 </div>
               </article>
             ))}
-            {busy && <div className="thinking" role="status"><span aria-hidden="true">✳</span> Working on it.</div>}
+            {preparingReply && <div className="thinking" role="status"><span aria-hidden="true">✳</span> Working on it.</div>}
+            {turn?.error ? <p className="task-error" role="status">{txt(turn.error)}</p> : null}
             <div ref={end} />
           </div>
         </div>
         <div className="composer-dock">
           <form className="composer" onSubmit={(event) => { event.preventDefault(); send(); }}>
             <label htmlFor="message" className="visually-hidden">Message your assistant</label>
-            <textarea id="message" value={input} onChange={(event) => setInput(event.target.value)} disabled={disabled || !selected || archived} rows={2} maxLength={12000} placeholder={archived ? "Restore this chat to continue." : "Ask anything, or describe a task…"} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } }} />
-            <div className="composer-footer"><span>{model}<span className="composer-shortcut"> · Shift + Enter for a new line</span></span><Button label={busy ? "Working" : "Send message"} variant="primary" isDisabled={disabled || !input.trim() || !selected || archived} onClick={send} /></div>
+            <textarea id="message" value={input} onChange={(event) => editDraft(event.target.value)} disabled={disabled || !selected || archived} rows={2} maxLength={12000} placeholder={archived ? "Restore this chat to continue." : "Ask anything, or describe a task…"} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } }} />
+            <div className="composer-footer"><span>{model}<span className="composer-shortcut"> · Shift + Enter for a new line</span></span>{input && <Button label="Discard draft" variant="secondary" isDisabled={disabled} onClick={() => editDraft()} />}{preparingReply
+              ? <Button label="Cancel reply" variant="secondary" isDisabled={disabled} onClick={cancelReply} />
+              : <Button label="Send message" variant="primary" isDisabled={disabled || !input.trim() || !selected || archived} onClick={send} />}</div>
           </form>
           {context && <details className="chat-context"><summary>Last request context: {Number(context.characters).toLocaleString()} / {Number(context.limit).toLocaleString()} characters</summary>
             <p>Context preparation model calls: {Number(context.modelCalls)}. Character counts are not token counts.</p>

@@ -46,8 +46,9 @@ class WorkspaceUIAcceptance(unittest.TestCase):
                 try:
                     page = browser.new_page(viewport={"width": 1440, "height": 1000})
                     page.set_default_timeout(15000)
-                    errors, external = [], []
+                    errors, external, diagnostics = [], [], []
                     page.on("pageerror", lambda error: errors.append(str(error)))
+                    page.on('request', lambda request: diagnostics.append(request.url) if request.url.endswith('/api/readiness') else None)
 
                     def local_only(route):
                         if route.request.url.startswith(origin):
@@ -86,6 +87,12 @@ class WorkspaceUIAcceptance(unittest.TestCase):
                     dialog.get_by_role("tab", name="Connectors", exact=True).click()
                     expect(dialog.get_by_role("heading", name="Google Workspace", exact=True)).to_be_visible()
                     expect(dialog.get_by_role("heading", name="MCP servers", exact=True)).to_be_visible()
+                    self.assertEqual(diagnostics, [])
+                    dialog.get_by_role('button', name='Check local runtime', exact=True).click()
+                    readiness = dialog.get_by_role('region', name='Readiness report')
+                    expect(readiness).to_contain_text('SQLite accepted a transaction.')
+                    expect(readiness).to_contain_text('Run the model check to verify access.')
+                    self.assertEqual(len(diagnostics), 1)
                     dialog.get_by_role("tab", name="Permissions", exact=True).click()
                     expect(dialog.get_by_text("Review actions before they happen", exact=True)).to_be_visible()
                     dialog.get_by_role("button", name="Review approvals", exact=False).click()

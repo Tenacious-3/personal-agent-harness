@@ -69,8 +69,56 @@ class DocumentTests(unittest.TestCase):
             doc=self.save({**self.body,'path':f'memory/agent/{state}.md','content':state,'sourceIds':['event:'+event['id']]})
             self.assertIn(state,self.docs.render(doc))
 
+    def test_owner_correction_holds_same_source_paraphrase_and_preserves_unrelated_notes(self):
+        primary = self.save()
+        related = self.save({**self.body, 'path': 'memory/agent/related.md',
+                             'content': 'SQLite is Aurora’s checkpoint store.'})
+        unrelated = self.save({**self.body, 'path': 'memory/agent/unrelated.md',
+                               'content': 'Aurora ships every Monday.'})
+        corrected = self.save({**self.body, 'id': primary['id'], 'expectedRevision': 1,
+                               'content': 'Aurora uses Postgres checkpoints.'}, owner=True)
+        held = self.docs.read(related['id'])
+        self.assertTrue(held['needsReview'])
+        self.assertEqual(held['correction'], {'id': primary['id'], 'revision': 2})
+        self.assertFalse(self.docs.read(unrelated['id'])['needsReview'])
+        self.assertNotIn('SQLite', self.docs.render(held))
+        recall = RecallIndex(self.store)
+        self.assertEqual(recall.search('Aurora Postgres')['results'][0]['id'], corrected['id'])
+        self.assertNotIn(related['id'], [result['id'] for result in recall.search('SQLite')['results']])
+        with self.assertRaisesRegex(ValueError, 'needs owner review'):
+            recall.read('document', related['id'])
+        updated = self.save({**held, 'expectedRevision': held['revision'], 'content': 'Postgres is Aurora’s checkpoint store.'}, owner=True)
+        self.assertFalse(updated['needsReview'])
+        self.assertIn('Postgres', recall.read('document', related['id'])['content'])
+
 
 class DocumentRuntimeTests(OfflineAsyncCase):
+    async def test_projection_writes_only_changed_or_missing_files_at_scale(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as folder:
+            root = Path(folder)
+            store = LocalStore(':memory:')
+            self.addCleanup(store.close)
+            docs = MemoryDocuments(store)
+            workspace = WorkspaceService(root)
+            task = store.create_task({'prompt': 'Projection fixture task'})
+            created = []
+            for size in (20, 500, 1000):
+                for index in range(len(created), size):
+                    created.append(docs.save(dict(path=f'memory/agent/note-{index:04d}.md',
+                        content=f'Note {index}', sourceIds=[f"task:{task['id']}"]), privacy_revision=0))
+                initial = await sync_memory_files(store, workspace)
+                self.assertGreater(initial['writes'], 0)
+                self.assertEqual((await sync_memory_files(store, workspace))['writes'], 0, f'{size} unchanged notes')
+                path = root / created[-1]['path']
+                path.write_text('Tampered test file')
+                (root / created[-2]['path']).unlink()
+                self.assertEqual((await sync_memory_files(store, workspace))['writes'], 2)
+            latest = created[-1]
+            docs.save({**latest, 'expectedRevision': 1, 'content': 'Edited one note'}, privacy_revision=0)
+            self.assertEqual((await sync_memory_files(store, workspace))['writes'], 1)
+            store.update_task(task['id'], {'status': 'running'})
+            self.assertEqual((await sync_memory_files(store, workspace))['writes'], 1000)
+
     async def test_symlink_namespace_cannot_write_outside_workspace(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder); outside=root/'outside'; outside.mkdir()

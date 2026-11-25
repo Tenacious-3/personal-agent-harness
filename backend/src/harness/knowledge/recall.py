@@ -52,7 +52,11 @@ class RecallIndex:
         expression = ' OR '.join('"' + term + '"' for term in terms)
         rows = self.store.db.execute('''SELECT kind,source_id,title,created_at,
             snippet(recall_index,3,'[',']',' … ',48) AS excerpt
-            FROM recall_index WHERE recall_index MATCH ? ORDER BY bm25(recall_index),created_at DESC LIMIT ?''',
+            FROM recall_index WHERE recall_index MATCH ? AND (kind!='document' OR NOT EXISTS
+                (SELECT 1 FROM memory_document_review r WHERE r.document_id=recall_index.source_id))
+            ORDER BY (kind='document' AND EXISTS (SELECT 1 FROM memory_documents d
+                WHERE d.id=recall_index.source_id AND d.provenance='user_reviewed')) DESC,
+                bm25(recall_index),created_at DESC LIMIT ?''',
             (expression, max(1, min(20, int(limit))))).fetchall()
         return {'results': [dict(id=r['source_id'], kind=r['kind'], title=r['title'][:160],
                                 excerpt=r['excerpt'][:600], createdAt=int(r['created_at'])) for r in rows], 'modelCalls': 0}
@@ -60,6 +64,8 @@ class RecallIndex:
     def read(self, kind, id_):
         if not isinstance(kind, str) or kind not in SOURCES or not isinstance(id_, str) or not 1 <= len(id_) <= 200:
             raise ValueError('Supply a valid recall kind and source ID')
+        if kind == 'document' and self.store.db.execute('SELECT 1 FROM memory_document_review WHERE document_id=?',(id_,)).fetchone():
+            raise ValueError('Document needs owner review after a correction. Open it in Memory.')
         row = self.store.db.execute(f'SELECT * FROM recall_source_{kind} WHERE id=?', (id_,)).fetchone()
         if not row:
             raise ValueError('Retained source not found')

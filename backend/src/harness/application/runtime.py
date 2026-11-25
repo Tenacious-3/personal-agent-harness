@@ -16,11 +16,12 @@ from harness.integrations.browser import BrowserService
 from harness.core.config import Config
 from harness.integrations.google import GoogleConnector
 from harness.integrations.google_sheets import GoogleSheets
-from harness.knowledge.memory import build_context, sync_memory_files
+from harness.knowledge.memory import build_context, build_context_packet, sync_memory_files
 from harness.knowledge.recall import RecallIndex
 from harness.scheduling.proactivity import select_update
 from harness.scheduling.cron import next_cron_time, next_interval_time
 from harness.persistence.store import LocalStore
+from harness.persistence.chat_turns import ChatTurns
 from harness.agents.workflows import research_workflow, workflow_task_id
 from harness.agents.templates import WorkflowTemplates
 from harness.knowledge.sessions import ChatSessions
@@ -32,11 +33,11 @@ from harness.integrations.mcp import MCPRegistry
 from harness.knowledge.freshness import FreshnessVerifier
 
 
-from harness.core.utils import now_ms, text, dump, safe_error
+from harness.core.utils import ActionPreflightError, now_ms, text, dump, safe_error
 
 
 WRITES = {'browser.click', 'browser.fill', 'gmail.send', 'calendar.create', 'sheets.update', 'workspace.execute', 'skill.save', 'slack.send', 'mastodon.publish', 'mcp.call'}
-READ_ONLY = {'browser_read', 'memory_search', 'history_search', 'recall_search', 'recall_read', 'people_search', 'provider_read', 'skills', 'gmail_read', 'calendar_read', 'sheets_read', 'mcp_list', 'mcp_read', 'workflow_templates'}
+READ_ONLY = {'browser_read', 'memory_search', 'history_search', 'recall_search', 'recall_read', 'people_search', 'provider_read', 'skills', 'gmail_read', 'calendar_read', 'sheets_read', 'mcp_list', 'mcp_read', 'workflow_templates', 'tasks_read'}
 BLOCKING_APPROVALS = {'pending', 'approved', 'executing', 'uncertain'}
 
 
@@ -45,8 +46,10 @@ class Runtime:
         self.config = config
         if len(config.token) < 24: raise ValueError('HARNESS_TOKEN must have at least 24 characters')
         if config.model != 'gpt-6-luna': raise ValueError('Only gpt-6-luna is permitted')
-        if any(type(n) is not int or n <= 0 for n in (config.daily_token_limit, config.run_token_reservation)):
-            raise ValueError('Token limits must be positive integers')
+        if type(config.daily_token_limit) is not int or config.daily_token_limit < 0:
+            raise ValueError('Daily token limit must be zero (uncapped) or a positive integer')
+        if type(config.run_token_reservation) is not int or config.run_token_reservation < 1:
+            raise ValueError('Per-run token reservation must be a positive integer')
         self.store = store or LocalStore(config.database_path)
         self.runner = runner or run_assistant
         self.browser = browser or BrowserService(config.data_dir / 'browser-profile', executable_path=config.browser_executable, channel=config.browser_channel)
@@ -55,6 +58,8 @@ class Runtime:
         self.sheets = GoogleSheets(self.store, self.google)
         self.workspace = workspace or WorkspaceService(config.data_dir / 'workspace', docker_enabled=config.docker_enabled, docker_image=config.docker_image)
         self.chats = ChatSessions(self.store)
+        self.chat_turns = ChatTurns(self.store, self.chats)
+        self.chat_turns.recover()
         self.documents = MemoryDocuments(self.store)
         self.templates = WorkflowTemplates(self.store)
         self.history_index = HistoryIndex(self.store)
@@ -69,6 +74,7 @@ class Runtime:
         self.model_tasks = {}
         self.chat_busy = False
         self.active_chat_session = None
+        self.chat_worker = None
         self.stopping = False
         self.ticking = False
         self.privacy_epoch = 0
@@ -94,6 +100,7 @@ class Runtime:
         self.stopping = True
         current = asyncio.current_task()
         tasks = set(self.active.values()) | set(self.model_tasks.values())
+        if self.chat_worker: tasks.add(self.chat_worker)
         if self.timer: tasks.add(self.timer)
         tasks.discard(current)
         for task in tasks: task.cancel()
@@ -122,15 +129,67 @@ class Runtime:
                 self.store.append_event('memory.projection-failed', {'message': safe_error(error)})
                 return {'error': 'Readable memory projection could not be refreshed. SQLite remains authoritative; managed files are blocked until refreshed.', 'revision': self.store.revision()}
 
-    async def model(self, prompt, context, task=None, read_only=False, no_tools=False):
+    def submit_chat(self, body):
+        message = text(body.get('message')).strip()
+        if not message or len(message) > 12000:
+            raise ValueError('Message must have 1-12000 characters')
+        if self.stopping:
+            raise ValueError('Workspace is stopping')
+        request_id = body.get('requestId', str(uuid4()))
+        turn, created = self.chat_turns.accept(request_id, body.get('sessionId', 'legacy'), message, self.chat_busy)
+        if created:
+            self.chat_busy = True
+            self.active_chat_session = turn['sessionId']
+            self.chat_worker = asyncio.create_task(self.run_chat(turn, message))
+        return turn, self.chat_worker if turn['status'] in ('queued', 'running') else None
+
+    async def run_chat(self, turn, message):
+        identifier = turn['id']
+        try:
+            if self.chat_turns.get(identifier)['status'] != 'queued':
+                return
+            packet = build_context_packet(self.store, message, session_id=turn['sessionId'])
+            self.chat_turns.start(identifier, {key: value for key, value in packet.items() if key != 'text'})
+            epoch = self.privacy_epoch
+            result = await self.model(message, packet['text'], chat_turn_id=identifier)
+            await self.project_memory()
+            if epoch != self.privacy_epoch:
+                raise ValueError('Context changed during this reply')
+            self.chat_turns.complete(identifier, result)
+        except asyncio.CancelledError:
+            self.chat_turns.stop(identifier, 'interrupted', 'Reply interrupted. Review any proposed actions before sending again.')
+        except Exception as error:
+            self.chat_turns.stop(identifier, 'failed', safe_error(error))
+        finally:
+            if self.chat_worker is asyncio.current_task():
+                self.chat_busy = False
+                self.active_chat_session = None
+                self.chat_worker = None
+
+    async def cancel_chat(self, identifier):
+        turn = self.chat_turns.get(identifier)
+        if not turn:
+            raise ValueError('Chat turn not found')
+        if turn['status'] == 'running' and self.chat_worker:
+            self.chat_turns.stop(identifier, 'cancelled', 'Reply cancelled. Previously proposed actions still require review.')
+            self.chat_worker.cancel()
+        elif turn['status'] == 'queued':
+            self.chat_turns.stop(identifier, 'cancelled', 'Reply cancelled before generation.')
+        return self.chat_turns.get(identifier)
+
+    async def model(self, prompt, context, task=None, read_only=False, no_tools=False, chat_turn_id=None):
         if not self.config.api_key: raise ValueError('Configure OPENAI_API_KEY in .dev.vars')
         run_id = str(uuid4()); key = task['id'] if task else run_id
         self.store.reserve_usage(run_id, self.config.daily_token_limit, self.config.run_token_reservation)
+        if chat_turn_id:
+            self.chat_turns.link_run(chat_turn_id, run_id)
         recorded = False; epoch = self.privacy_epoch; memory_revision=self.store.revision()
         if task: context=(f"CURRENT TASK REFERENCE task:{task['id']}\n"+context)[:12000]
         self.model_tasks[key] = asyncio.current_task()
         def ensure_active():
-            if self.stopping or epoch != self.privacy_epoch or (task and self.store.get_task(task['id'])['status'] == 'cancelled'):
+            if (self.stopping or epoch != self.privacy_epoch
+                    or (task and self.store.get_task(task['id'])['status'] == 'cancelled')
+                    or (chat_turn_id and self.chat_turns.get(chat_turn_id)['status'] != 'running')):
                 raise ValueError('Run cancelled or context forgotten')
         async def remember(value):
             nonlocal memory_revision
@@ -206,7 +265,10 @@ class Runtime:
         action = args.get('action')
         if operation=='memory_documents':
             if action in ('list','read'):
-                return self.documents.read(text(args.get('id'))) if action=='read' else self.documents.list(args.get('offset',0))
+                if action == 'list': return self.documents.list(args.get('offset',0))
+                document = self.documents.read(text(args.get('id')))
+                if document['needsReview']: raise ValueError('Document is held for owner review after a correction')
+                return document
             if action!='save': raise ValueError('Unknown memory document action')
             self.documents.check_workspace(self.workspace,args.get('path'))
             result=self.documents.save(args,privacy_revision=args.get('privacyRevision'))
@@ -253,6 +315,13 @@ class Runtime:
             self.store.append_event('mcp.result', {'connectionId': text(args.get('id')), 'tool': text(args.get('tool')), 'result': result}, task_id)
             return result
         if operation == 'memory_search': return {'memories': self.store.list_memories(text(args.get('query'))), 'revision': self.store.revision()}
+        if operation == 'tasks_read':
+            if args.get('id'):
+                return self.inspect_task(text(args['id']))
+            page = self.store.task_page(status=text(args.get('status')), parent_id=text(args.get('parentId')),
+                                        query=text(args.get('query')), before=text(args.get('before')), limit=12)
+            return {**page, 'tasks': [dict(id=t['id'], parentId=t['parentId'], status=t['status'],
+                                          prompt=t['prompt'][:240]) for t in page['tasks']]}
         if operation == 'history_search': return await self.search_history(text(args.get('query')), args.get('semantic') is True)
         if operation == 'recall_search': return self.recall.search(text(args.get('query')))
         if operation == 'recall_read': return self.recall.read(text(args.get('kind')), text(args.get('id')))
@@ -298,8 +367,7 @@ class Runtime:
         if operation == 'propose_action': return await self.propose_action(text(args.get('kind')), args.get('payload'), text(args.get('summary')), task_id)
         if operation == 'delegate':
             if not task or task.get('parentId'): raise ValueError('Only a top-level background task can delegate')
-            if len([t for t in self.store.list_tasks(500) if t['parentId'] == task_id]) >= 3: raise ValueError('Subtask limit reached')
-            return self.store.create_task(dict(prompt=text(args.get('prompt')), parentId=task_id, kind='task'))
+            return self.store.create_delegated_task(task_id, text(args.get('prompt')))
         if operation == 'notify': return self.store.add_notification(dict(title=text(args.get('title')), body=text(args.get('body')), taskId=task_id, dedupeKey=f"agent:{task_id or 'chat'}:{hashlib.sha256(text(args.get('body')).encode()).hexdigest()}"))
         if operation == 'schedule_cron': return self.create_schedule(args)
         raise ValueError('Unknown capability')
@@ -318,16 +386,12 @@ class Runtime:
             if not tab: raise ValueError('Browser tab missing')
             if payload.get('expectedUrl') and payload['expectedUrl'] != tab['url']: raise ValueError('Browser page changed; inspect it again')
             payload = {**payload, 'expectedUrl': tab['url']}
-        pending = next((a for a in self.store.list_approvals() if a['status'] == 'pending' and a['taskId'] == task_id and a['kind'] == kind and a['payload'] == payload), None)
-        if pending: return pending
-        approval = self.store.create_approval(dict(taskId=task_id, kind=kind, payload=payload, summary=summary or f'Review {kind}'))
-        self.store.add_notification(dict(title='Approval needed', body=approval['summary'], taskId=task_id, dedupeKey=f"approval:{approval['id']}"))
-        return approval
+        return self.store.propose_approval(task_id, kind, payload, summary or f'Review {kind}')
 
     def resume_task(self, task_id):
         if not task_id: return
         task = self.store.get_task(task_id)
-        blocked = any(a['taskId'] == task_id and a['status'] in BLOCKING_APPROVALS for a in self.store.list_approvals())
+        blocked = self.store.has_task_approval(task_id, BLOCKING_APPROVALS)
         if task and task['status'] == 'waiting_approval' and not blocked: self.store.update_task(task_id, {'status': 'queued'})
 
     async def execute_action(self, approval):
@@ -336,25 +400,36 @@ class Runtime:
         try:
             kind = claimed['kind']
             if kind.startswith('browser.'):
-                if (await self.browser.status())['manualControl']: raise ValueError('Browser is under manual control')
+                if (await self.browser.status())['manualControl']: raise ActionPreflightError('Browser is under manual control')
                 tab = next((t for t in await self.browser.tabs() if t['id'] == payload.get('tabId')), None)
-                if not tab or tab['url'] != payload.get('expectedUrl'): raise ValueError('Browser page changed; create a new approval')
+                if not tab or tab['url'] != payload.get('expectedUrl'): raise ActionPreflightError('Browser page changed; create a new approval')
+                if not isinstance(payload.get('selector'), str) or not payload['selector'] or len(payload['selector']) > 2000:
+                    raise ActionPreflightError('Invalid browser selector')
                 result = await self.browser.click(payload['tabId'], payload['selector']) if kind == 'browser.click' else await self.browser.fill(payload['tabId'], payload['selector'], payload.get('value', ''))
             elif kind in ('gmail.send', 'calendar.create'): result = await self.google.execute_write(kind, payload)
             elif kind == 'mcp.call': result = await self.mcp.execute_write(payload)
             elif kind == 'sheets.update':
-                await self.sheets.validate_update(payload)
+                try:
+                    await self.sheets.validate_update(payload)
+                except (ValueError, RuntimeError) as error:
+                    raise ActionPreflightError(safe_error(error)) from None
                 result = await self.google.execute_write(kind, payload)
             elif kind in ('slack.send', 'mastodon.publish'): result = await self.providers.execute_write(kind, payload, claimed['id'])
             elif kind == 'workspace.execute':
-                if self.store.get_setting('memoryProjectionStale'): raise ValueError('Refresh stale managed memory files before script execution')
+                if self.store.get_setting('memoryProjectionStale'): raise ActionPreflightError('Refresh stale managed memory files before script execution')
                 result = await self.workspace.execute_script(payload)
             elif kind == 'skill.save': result = await self.workspace.save_skill(payload['name'], payload['content'])
-            else: raise ValueError('Unsupported approved action')
+            else: raise ActionPreflightError('Unsupported approved action')
             completed = self.store.complete_action(claimed['id'], {'result': result or {'ok': True}})
             self.store.append_event('action.completed', {'approvalId': claimed['id'], 'result': result}, task_id)
             self.store.add_notification(dict(title='Action completed', body=claimed['summary'], taskId=task_id, dedupeKey=f"action:{claimed['id']}"))
             self.resume_task(task_id); return completed
+        except ActionPreflightError as error:
+            message = f'Action stopped before delivery. {safe_error(error)}'
+            failed = self.store.complete_action(claimed['id'], {'error': message})
+            self.store.append_event('action.preflight-rejected', {'approvalId': claimed['id'], 'message': message}, task_id)
+            self.resume_task(task_id)
+            return failed
         except BaseException as error:
             message = f'Action outcome needs review: {safe_error(error)}. Reconcile with the destination before retrying.'
             uncertain = self.store.mark_action_uncertain(claimed['id'], message)
@@ -365,19 +440,26 @@ class Runtime:
     def cancel_task(self, task_id):
         candidate = self.store.get_task(task_id)
         if candidate and candidate['parentId'] and self.store.get_workflow(candidate['parentId']): task_id = candidate['parentId']
-        root = self.store.get_task(task_id)
-        if not root: raise ValueError('Task not found')
-        tasks = self.store.workflow_tasks(task_id) if self.store.get_workflow(task_id) else self.store.list_tasks(1000)
-        ids = {task_id}
-        for _ in tasks:
-            ids.update(t['id'] for t in tasks if t['parentId'] in ids)
-        for id_ in ids:
-            task = self.store.get_task(id_)
-            if task['status'] not in ('completed', 'cancelled'): self.store.update_task(id_, {'status': 'cancelled'})
+        for id_ in self.store.cancel_task_tree(task_id):
             if id_ in self.active: self.active[id_].cancel()
-            for approval in self.store.list_approvals():
-                if approval['taskId'] == id_ and approval['status'] == 'pending': self.store.decide_approval(approval['id'], 'rejected', approval['digest'])
         return self.store.get_task(task_id)
+
+    def inspect_task(self, task_id):
+        task = self.store.get_task(task_id)
+        if not task:
+            raise ValueError('Task not found')
+        return self.task_controls(task)
+
+    def task_controls(self, task):
+        workflow_id = self.task_workflow_id(task)
+        affected = [workflow_id, *(child['id'] for child in self.store.workflow_tasks(workflow_id))] if workflow_id else [task['id']]
+        return {**task, 'requiresReconciliation': any(
+            self.store.has_task_approval(task_id, ('uncertain', 'executing')) for task_id in affected)}
+
+    def task_workflow_id(self, task):
+        if self.store.get_workflow(task['id']):
+            return task['id']
+        return task['parentId'] if task['parentId'] and self.store.get_workflow(task['parentId']) else None
 
     def workflow_view(self, workflow):
         return {**workflow, **self.store.get_task(workflow['id']), 'nodes': [{**node, 'task': self.store.get_task(workflow_task_id(workflow['id'], node['id']))} for node in workflow['nodes']]}
@@ -401,6 +483,9 @@ class Runtime:
         tasks = self.store.workflow_tasks(id_)
         if any(t['id'] in self.active for t in tasks): raise ValueError('Workflow agents are still finishing')
         if any(t['status'] == 'cancelled' for t in tasks): raise ValueError('Cancelled workflow agents cannot retry')
+        if any(self.store.has_task_approval(task_id, ('uncertain', 'executing'))
+               for task_id in [id_, *(t['id'] for t in tasks)]):
+            raise ValueError('Reconcile uncertain actions before retrying')
         if any(t['status'] == 'failed' and t['attempts'] >= 3 for t in tasks): raise ValueError('Workflow retry limit reached')
         for task in tasks:
             if task['status'] == 'failed': self.store.update_task(task['id'], {'status': 'queued', 'error': None})
@@ -460,8 +545,8 @@ class Runtime:
         try:
             task = self.store.update_task(task['id'], {'status': 'running'})
             revision = self.store.revision(); source_ids = [m['id'] for m in self.store.list_messages(24)]
-            previous = [{k: a[k] for k in ('kind', 'status', 'result', 'error')} for a in self.store.list_approvals() if a['taskId'] == task['id']]
-            children = [{k: t[k] for k in ('id', 'status', 'result')} for t in self.store.list_tasks(500) if t['parentId'] == task['id']]
+            previous = [{k: a[k] for k in ('kind', 'status', 'result', 'error')} for a in self.store.task_approvals(task['id'])]
+            children = [{k: t[k] for k in ('id', 'status', 'result')} for t in self.store.child_tasks(task['id'])]
             workflow = self.store.get_workflow(task['parentId']) if task['parentId'] else None
             prompt = task['prompt']
             if workflow:
@@ -474,7 +559,7 @@ class Runtime:
             elif task['kind'] == 'dream': prompt = 'Review recent activity into memory consolidation PROPOSALS with message IDs. Preserve corrections; label inference. Do not act. ' + prompt
             result = await self.model(f'{prompt}\nPrior action outcomes: {dump(previous)}\nSubtask results: {dump(children)}', build_context(self.store, task['prompt']), task, task['kind'] == 'dream' or bool(task['parentId']))
             if self.stopping or self.store.get_task(task['id'])['status'] == 'cancelled': return
-            pending = any(a['taskId'] == task['id'] and a['status'] in BLOCKING_APPROVALS for a in self.store.list_approvals())
+            pending = self.store.has_task_approval(task['id'], BLOCKING_APPROVALS)
             self.store.update_task(task['id'], {'status': 'waiting_approval' if pending else 'completed', 'result': result, 'error': None})
             if workflow:
                 self.store.append_event('workflow.agent-completed', {'agent': node['id'], 'role': node['role']}, workflow['id']); return

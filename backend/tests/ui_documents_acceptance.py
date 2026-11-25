@@ -21,6 +21,7 @@ class DocumentUIAcceptance(unittest.TestCase):
             refs=['message:'+doc_source]
             first=await caps.operate('memory_documents',json.dumps(dict(action='save',path='memory/agent/project/architecture.md',content='SQLite stores authoritative state.',sourceIds=refs)))
             await caps.operate('memory_documents',json.dumps(dict(action='save',path='memory/agent/procedures/review.md',content='Review actual execution receipts.',sourceIds=refs)))
+            await caps.operate('memory_documents',json.dumps(dict(action='save',path='memory/agent/project/storage.md',content='SQLite is the project storage engine.',sourceIds=refs)))
             await caps.operate('memory_documents',json.dumps(dict(action='save',id=first['id'],expectedRevision=first['revision'],path=first['path'],content='SQLite stores authoritative state; readable files are projections.',sourceIds=refs)))
             caps.on_usage(10,10)
             return 'Created two sourced documents and updated the architecture document.'
@@ -51,11 +52,14 @@ class DocumentUIAcceptance(unittest.TestCase):
                         page.get_by_role('button',name='Open document memory/agent/project/architecture.md',exact=True).click()
                         expect(page.get_by_label('Memory document content',exact=True)).to_have_value('SQLite stores authoritative state; readable files are projections.')
                         page.get_by_label('Memory document path',exact=True).fill('memory/agent/project/decisions.md')
-                        page.get_by_label('Memory document content',exact=True).fill('Owner correction: check SQLite and its real file projections.')
+                        page.get_by_label('Memory document content',exact=True).fill('Owner correction: Postgres stores authoritative state; readable files are projections.')
                         page.get_by_role('button',name='Save reviewed document',exact=True).click()
                         expect(page.get_by_text('Reviewed document saved. Your correction is protected.',exact=True)).to_be_visible()
                         self.assertFalse((root/'.assistant/workspace/memory/agent/project/architecture.md').exists())
                         self.assertIn('Owner correction',(root/'.assistant/workspace/memory/agent/project/decisions.md').read_text())
+                        page.get_by_role('button',name='Open document memory/agent/project/storage.md',exact=True).click()
+                        expect(page.get_by_text('put this document on hold',exact=False)).to_be_visible()
+                        self.assertNotIn('SQLite',(root/'.assistant/workspace/memory/agent/project/storage.md').read_text())
                         page.set_viewport_size({'width':390,'height':844})
                         self.assertTrue(page.evaluate('document.documentElement.scrollWidth<=innerWidth+1'))
                         with httpx.Client(base_url=origin,trust_env=False,headers={'Authorization':'Bearer '+TOKEN}) as api:
@@ -69,7 +73,9 @@ class DocumentUIAcceptance(unittest.TestCase):
                     config.port=0
                     with serve(config,factory) as restarted:
                         with httpx.Client(base_url=restarted,trust_env=False,headers={'Authorization':'Bearer '+TOKEN}) as api:
-                            self.assertEqual(len(api.get('/api/memory-documents').json()['documents']),2)
+                            docs=api.get('/api/memory-documents').json()['documents']
+                            self.assertEqual(len(docs),3)
+                            self.assertTrue(next(doc for doc in docs if doc['path'].endswith('/storage.md'))['needsReview'])
                         page.goto(restarted)
                         page.get_by_label('Workspace access token',exact=True).fill(TOKEN)
                         page.get_by_role('button',name='Connect workspace',exact=True).click()

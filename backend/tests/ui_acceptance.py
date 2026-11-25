@@ -6,6 +6,8 @@ The model runner is deterministic; no secrets or live assistant data are loaded.
 from contextlib import contextmanager
 from pathlib import Path
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -59,6 +61,134 @@ def serve(config, runtime_factory_override=None):
 
 
 class UIAcceptance(unittest.TestCase):
+    def test_workspace_backup_cli_restores_chat_to_a_new_workspace(self):
+        with tempfile.TemporaryDirectory(prefix="harness-restore-ui-") as folder:
+            root = Path(folder)
+            config = Config(root=root, data_dir=root / '.assistant', database_dir=root / 'sqlite', port=0,
+                            token=TOKEN, encryption_secret=TOKEN, api_key='synthetic-model-no-network',
+                            frontend_dir=ROOT / 'frontend/dist')
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch()
+                try:
+                    page = browser.new_page()
+                    log = page.get_by_role('log', name='Conversation')
+
+                    def connect(origin):
+                        page.goto(origin)
+                        page.get_by_label('Workspace access token').fill(TOKEN)
+                        page.get_by_role('button', name='Connect workspace', exact=True).click()
+
+                    with serve(config) as origin:
+                        connect(origin)
+                        expect(page.get_by_label('Choose chat')).to_have_value('legacy')
+                        composer = page.get_by_label('Message your assistant')
+                        expect(composer).to_be_enabled()
+                        composer.fill('Restore this browser conversation')
+                        expect(composer).to_have_value('Restore this browser conversation')
+                        page.get_by_role('button', name='Send message', exact=True).click()
+                        expect(log).to_contain_text('Synthetic local acceptance result')
+                    command = [sys.executable, '-m', 'harness.cli.workspace_backup']
+                    archive = root / 'offline.zip'
+                    common = ['--archive', str(archive), '--build', 'acceptance-fixture']
+                    subprocess.run([*command, 'backup', *common, '--state', str(config.data_dir),
+                                    '--database', str(config.database_path)], check=True, capture_output=True, text=True)
+                    restored = root / 'restored'
+                    subprocess.run([*command, 'restore', *common, '--target', str(restored)],
+                                   check=True, capture_output=True, text=True)
+                    config.data_dir = restored / '.assistant'
+                    config.database_dir = restored / 'database'
+                    config.port = 0
+                    with serve(config) as origin:
+                        connect(origin)
+                        expect(log).to_contain_text('Restore this browser conversation')
+                        expect(log.get_by_text('Synthetic local acceptance result', exact=True)).to_have_count(1)
+                    print('Offline workspace backup and restore CLI preserved a browser conversation in a separate workspace')
+                finally:
+                    browser.close()
+
+    def test_retained_approval_keeps_task_waiting_after_restart(self):
+        seeded = False
+
+        def factory(config, store):
+            nonlocal seeded
+            store.set_setting("nightlyDreamEnabled", False)
+            if not seeded:
+                task = store.create_task({"prompt": "Retained approval acceptance task"})
+                store.update_task(task["id"], {"status": "running"})
+                def seed_approvals():
+                    for index in range(1006):
+                        store.create_approval({
+                            "taskId": task["id"] if index == 0 else None,
+                            "kind": "skill.save", "payload": {}, "summary": f"Fixture approval {index}",
+                        })
+                        if index:
+                            other = store.create_task({"prompt": f"Completed history fixture {index}"})
+                            store.update_task(other['id'], {'status': 'running'})
+                            store.update_task(other['id'], {'status': 'completed'})
+                store._tx(seed_approvals)
+                seeded = True
+            return Runtime(config, store=store, runner=synthetic_runner)
+
+        with tempfile.TemporaryDirectory(prefix="harness-retained-ui-") as folder:
+            root = Path(folder)
+            config = Config(
+                root=root, data_dir=root / ".assistant", database_dir=root / "database", port=0,
+                token=TOKEN, encryption_secret=TOKEN, api_key="synthetic-model-no-network",
+                frontend_dir=ROOT / "frontend/dist",
+            )
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch()
+                try:
+                    page = browser.new_page()
+                    for attempt in range(2):
+                        config.port = 0
+                        with serve(config, factory) as origin:
+                            page.goto(origin)
+                            page.get_by_label("Workspace access token").fill(TOKEN)
+                            page.get_by_role("button", name="Connect workspace", exact=True).click()
+                            navigation = page.get_by_role("navigation", name="Main navigation")
+                            tasks = navigation.get_by_role("button", name="Tasks", exact=True)
+                            if not tasks.is_visible():
+                                navigation.get_by_role("button", name="More tools", exact=True).click()
+                            tasks.click()
+                            older = page.get_by_role('button', name='Older tasks', exact=True)
+                            older.click()
+                            expect(page.get_by_role('button', name='Newer tasks', exact=True)).to_be_visible()
+                            page.get_by_label('Search tasks').fill('Retained approval acceptance task')
+                            page.get_by_label('Task status').select_option('waiting_approval')
+                            record = page.get_by_role("article").filter(has_text="Retained approval acceptance task")
+                            expect(record.get_by_role("button", name="Review pending actions")).to_be_visible()
+                            record.get_by_role('button', name='Inspect task', exact=True).click()
+                            expect(record).to_contain_text('Task ID')
+                            page.reload()
+                            expect(record).to_contain_text('Task ID')
+                            if attempt:
+                                record.get_by_role('button', name='Cancel task', exact=True).click()
+                                expect(record.get_by_text('cancelled', exact=True)).to_be_visible()
+                                continue
+                            record.get_by_role("button", name="Review pending actions").click()
+                            expect(page.get_by_text("Fixture approval 0", exact=True)).to_be_visible()
+                            expect(page.get_by_text("Fixture approval 1005", exact=True)).to_have_count(0)
+                            page.go_back()
+                            expect(record).to_contain_text('Task ID')
+                            page.go_forward()
+                            expect(page.get_by_text("Fixture approval 0", exact=True)).to_be_visible()
+                            bookmark = page.url
+                            guest = browser.new_page(viewport={"width": 390, "height": 844})
+                            try:
+                                guest.goto(bookmark)
+                                guest.get_by_label("Workspace access token").fill(TOKEN)
+                                guest.get_by_role("button", name="Connect workspace", exact=True).click()
+                                expect(guest.get_by_text("Fixture approval 0", exact=True)).to_be_visible()
+                                guest.goto(origin + '/#/tasks?id=missing-task')
+                                expect(guest.get_by_role('alert')).to_contain_text('Task not found')
+                            finally:
+                                guest.close()
+                    self.assertTrue(config.database_path.is_file())
+                    print("Retained task paging, filtering, inspection, approval hold across restart, and cancellation passed")
+                finally:
+                    browser.close()
+
     def test_local_workspace_round_trip_and_restart(self):
         if not (ROOT / "frontend/dist/index.html").is_file():
             self.fail("Build frontend/dist before running UI acceptance")
@@ -135,7 +265,6 @@ class UIAcceptance(unittest.TestCase):
                             page.get_by_label("File contents").fill("Acceptance file marker")
                             page.get_by_role("button", name="Save file", exact=True).click()
                             expect(page.get_by_text("File saved in the assistant workspace.", exact=True)).to_be_visible()
-                            page.get_by_label("File contents").fill("")
                             page.get_by_role("button", name="Read file", exact=True).click()
                             expect(page.get_by_label("File contents")).to_have_value("Acceptance file marker")
                             page.get_by_label("Folder", exact=True).fill("reports")

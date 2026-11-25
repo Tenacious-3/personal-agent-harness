@@ -7,6 +7,7 @@ from harness.agents.workflows import validate_workflow, workflow_task_id
 from harness.knowledge.index import initialize_knowledge, forget_knowledge, invalidate_knowledge
 from harness.knowledge.sessions import initialize_sessions, ChatSessions, DEFAULT_SESSION_ID
 from harness.knowledge.documents import initialize_documents, MemoryDocuments
+from harness.persistence.chat_turns import initialize_chat_turns
 
 def _now(): return int(time.time()*1000)
 def _id(): return str(uuid.uuid4())
@@ -91,8 +92,11 @@ class LocalStore:
             CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,task_id TEXT,dedupe_key TEXT UNIQUE,read_at INTEGER,created_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY,type TEXT NOT NULL,task_id TEXT,detail TEXT NOT NULL,created_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS usage(run_id TEXT PRIMARY KEY,day TEXT NOT NULL,reserved_tokens INTEGER NOT NULL,input_tokens INTEGER NOT NULL,output_tokens INTEGER NOT NULL,status TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id);
+            CREATE INDEX IF NOT EXISTS idx_approvals_task_status ON approvals(task_id,status);
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status,created_at); CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules(status,next_run_at); CREATE INDEX IF NOT EXISTS idx_usage_day ON usage(day);''')
             initialize_sessions(self.db)
+            initialize_chat_turns(self.db)
             initialize_documents(self.db)
             initialize_knowledge(self.db)
         except BaseException:
@@ -207,6 +211,7 @@ class LocalStore:
             m=self._memory(r); lineage=self.memory_lineage(id); phrases={m['text'],*(v['snapshot']['text'] for v in lineage)}
             MemoryDocuments(self).invalidate(['memory:'+id,*m['sourceIds'],*(s for v in lineage for s in v['snapshot']['sourceIds'])],phrases,retired_sources=['memory:'+id,*m['sourceIds'],*(s for v in lineage for s in v['snapshot']['sourceIds'])])
             forget_knowledge(self.db, m, phrases, m['sourceIds'] if include_source_messages else ())
+            self.db.execute('UPDATE chat_turns SET context=NULL WHERE context IS NOT NULL')
             if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_templates'").fetchone():
                 from harness.agents.templates import WorkflowTemplates
                 WorkflowTemplates(self).forget_claims(phrases)
@@ -215,7 +220,7 @@ class LocalStore:
             self.db.execute('DELETE FROM memories WHERE id=?',(id,)); self.db.execute('DELETE FROM memory_versions WHERE memory_id=?',(id,)); self.db.execute("DELETE FROM settings WHERE key IN ('conversationSummary','alignmentSynthesis') OR key LIKE 'conversationSummary:%' OR key LIKE 'dream:%'")
             for p in phrases:
                 if not p: continue
-                for table,cols in [('tasks',['prompt','result','error']),('notifications',['title','body']),('goals',['title','description']),('chat_sessions',['title'])]:
+                for table,cols in [('tasks',['prompt','result','error']),('notifications',['title','body']),('goals',['title','description']),('chat_sessions',['title']),('chat_turns',['error'])]:
                     for c in cols: self.db.execute(f"UPDATE {table} SET {c}=replace({c},?,'[forgotten]') WHERE instr({c},?)>0",(p,p))
                 for goal in self._rows('SELECT id,steps FROM goals'):
                     steps=json.loads(goal['steps'])
@@ -247,6 +252,38 @@ class LocalStore:
     def get_task(self,id):
         r=self.db.execute('SELECT * FROM tasks WHERE id=?',(id,)).fetchone(); return self._task(r) if r else None
     def list_tasks(self,limit=100): return [self._task(r) for r in self._rows('SELECT * FROM tasks ORDER BY created_at DESC,rowid DESC LIMIT ?',max(1,min(1000,limit)))]
+
+    def task_counts(self):
+        return dict(self.db.execute('SELECT status,count(*) FROM tasks GROUP BY status').fetchall())
+
+    def task_page(self, *, status=None, parent_id=None, query='', before=None, limit=100):
+        if status and status not in ('queued', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled'):
+            raise ValueError('Invalid task status')
+        if not isinstance(query, str) or len(query) > 200:
+            raise ValueError('Task search must be at most 200 characters')
+        filters, parameters = [], []
+        if status:
+            filters.append('status=?')
+            parameters.append(status)
+        if parent_id:
+            filters.append('parent_id=?')
+            parameters.append(parent_id)
+        if query.strip():
+            filters.append("(instr(lower(prompt), lower(?))>0 OR id=?)")
+            parameters.extend([query.strip()] * 2)
+        if before:
+            cursor = self.db.execute('SELECT created_at,rowid FROM tasks WHERE id=?', (before,)).fetchone()
+            if not cursor:
+                raise ValueError('Task page cursor not found')
+            filters.append('(created_at,rowid)<(?,?)')
+            parameters.extend(cursor)
+        where = ' WHERE ' + ' AND '.join(filters) if filters else ''
+        limit = max(1, min(100, int(limit)))
+        rows = self._rows('SELECT * FROM tasks' + where + ' ORDER BY created_at DESC,rowid DESC LIMIT ?',
+                          *parameters, limit + 1)
+        return dict(tasks=[self._task(row) for row in rows[:limit]],
+                    nextBefore=rows[limit - 1]['id'] if len(rows) > limit else None)
+
     def iter_queued_tasks(self):
         """Oldest-first scheduler candidates, independent of retained history size.
 
@@ -281,8 +318,11 @@ class LocalStore:
             requeued=failed=0
             for r in self._rows("SELECT * FROM tasks WHERE status='running' AND id NOT IN (SELECT id FROM workflows)"):
                 exhausted=r['attempts']>=max_attempts; self.db.execute('UPDATE tasks SET status=?,error=?,updated_at=? WHERE id=?',('failed' if exhausted else 'queued','Restart recovery exhausted retry limit' if exhausted else 'Interrupted run requeued after restart',_now(),r['id'])); failed+=int(exhausted); requeued+=int(not exhausted)
-            uncertain=self.db.execute("UPDATE approvals SET status='uncertain',error='Process stopped during action; reconcile before retry',updated_at=? WHERE status='executing'",(_now(),)).rowcount
-            held=self.db.execute("UPDATE tasks SET status='waiting_approval',error='An action outcome is uncertain; reconcile manually',updated_at=? WHERE id IN (SELECT task_id FROM approvals WHERE status='uncertain') AND status='queued'",(_now(),)).rowcount
+            now = _now()
+            uncertain=self.db.execute("UPDATE approvals SET status='uncertain',error='Process stopped during action; reconcile before retry',updated_at=? WHERE status='executing'",(now,)).rowcount
+            held=self.db.execute("""UPDATE tasks SET status='waiting_approval',updated_at=?
+                WHERE id IN (SELECT task_id FROM approvals WHERE status='uncertain'
+                    OR (status IN ('pending','approved') AND expires_at>?)) AND status='queued'""",(now,now)).rowcount
             return dict(requeued=max(0,requeued-held),failed=failed,uncertain=uncertain)
         return self._tx(work)
     def create_workflow(self,input):
@@ -295,7 +335,45 @@ class LocalStore:
     def get_workflow(self,id):
         r=self.db.execute('SELECT * FROM workflows WHERE id=?',(id,)).fetchone(); return {**json.loads(r['definition']),'id':id,'createdAt':r['created_at']} if r else None
     def list_workflows(self): return [self.get_workflow(r[0]) for r in self._rows('SELECT id FROM workflows ORDER BY created_at DESC')]
-    def workflow_tasks(self,id): return [self._task(r) for r in self._rows('SELECT * FROM tasks WHERE parent_id=? ORDER BY created_at,rowid',id)]
+    def child_tasks(self, parent_id):
+        return [self._task(row) for row in self._rows(
+            'SELECT * FROM tasks WHERE parent_id=? ORDER BY created_at DESC,rowid DESC', parent_id)]
+
+    def workflow_tasks(self,id):
+        return [self._task(row) for row in self._rows(
+            'SELECT * FROM tasks WHERE parent_id=? ORDER BY created_at,rowid', id)]
+
+    def create_delegated_task(self, parent_id, prompt):
+        def work():
+            parent = self.get_task(parent_id)
+            if not parent or parent['parentId']:
+                raise ValueError('Only a top-level background task can delegate')
+            if parent['status'] in ('cancelled', 'completed', 'failed'):
+                raise ValueError('A finished task cannot delegate')
+            count = self.db.execute('SELECT count(*) FROM tasks WHERE parent_id=?', (parent_id,)).fetchone()[0]
+            if count >= 3:
+                raise ValueError('Subtask limit reached')
+            return self.create_task({'prompt': prompt, 'parentId': parent_id, 'kind': 'task'})
+        return self._tx(work)
+
+    def cancel_task_tree(self, root_id):
+        def work():
+            if not self.get_task(root_id):
+                raise ValueError('Task not found')
+            rows = self._rows('''WITH RECURSIVE descendants(id) AS (
+                SELECT ? UNION SELECT tasks.id FROM tasks JOIN descendants ON tasks.parent_id=descendants.id
+            ) SELECT id FROM descendants''', root_id)
+            ids = [row['id'] for row in rows]
+            now = _now()
+            self.db.executemany(
+                "UPDATE tasks SET status='cancelled',updated_at=? WHERE id=? AND status NOT IN ('completed','cancelled')",
+                [(now, task_id) for task_id in ids])
+            self.db.executemany(
+                """UPDATE approvals SET status=CASE WHEN expires_at<=? THEN 'expired' ELSE 'rejected' END,
+                updated_at=? WHERE task_id=? AND status IN ('pending','approved')""",
+                [(now, now, task_id) for task_id in ids])
+            return ids
+        return self._tx(work)
     def save_schedule(self,input):
         id=input.get('id') or _id(); now=_now(); nxt=_time(input['runAt']); interval=input.get('intervalSeconds')
         if interval is not None and (not isinstance(interval,int) or interval<60): raise ValueError('Schedule interval must be at least 60 seconds')
@@ -328,6 +406,35 @@ class LocalStore:
     def get_approval(self,id):
         r=self.db.execute('SELECT * FROM approvals WHERE id=?',(id,)).fetchone(); return self._approval(r) if r else None
     def list_approvals(self,limit=100): return [self._approval(r) for r in self._rows('SELECT * FROM approvals ORDER BY created_at DESC,rowid DESC LIMIT ?',max(1,min(1000,limit)))]
+
+    def task_approvals(self, task_id):
+        return [self._approval(row) for row in self._rows(
+            'SELECT * FROM approvals WHERE task_id=? ORDER BY created_at DESC,rowid DESC', task_id)]
+
+    def has_task_approval(self, task_id, statuses):
+        placeholders = ','.join('?' for _ in statuses)
+        return self.db.execute(
+            f"""SELECT 1 FROM approvals WHERE task_id=? AND status IN ({placeholders})
+            AND (status NOT IN ('pending','approved') OR expires_at>?) LIMIT 1""",
+            (task_id, *statuses, _now())).fetchone() is not None
+
+    def propose_approval(self, task_id, kind, payload, summary):
+        def work():
+            if task_id is not None:
+                task = self.get_task(task_id)
+                if not task or task['status'] == 'cancelled':
+                    raise ValueError('A current task is required to propose actions')
+            row = self.db.execute(
+                """SELECT * FROM approvals WHERE task_id IS ? AND status='pending' AND kind=?
+                AND payload=? AND expires_at>? ORDER BY created_at DESC,rowid DESC LIMIT 1""",
+                (task_id, kind, canonical_json(payload), _now())).fetchone()
+            if row:
+                return self._approval(row)
+            approval = self.create_approval(dict(taskId=task_id, kind=kind, payload=payload, summary=summary))
+            self.add_notification(dict(title='Approval needed', body=approval['summary'], taskId=task_id,
+                                       dedupeKey=f"approval:{approval['id']}"))
+            return approval
+        return self._tx(work)
     def decide_approval(self,id,decision,expected_digest):
         a=self.get_approval(id)
         if not a: raise ValueError('Approval not found')
@@ -390,16 +497,18 @@ class LocalStore:
             if sid in ids or step.get('status') not in ('pending','running','completed','blocked'): raise ValueError('Invalid goal step')
             ids.add(sid)
     def reserve_usage(self,run_id,limit,reserve_tokens):
-        if not isinstance(limit,int) or limit<1 or not isinstance(reserve_tokens,int) or reserve_tokens<1: raise ValueError('Invalid token budget')
+        if type(limit) is not int or limit<0 or type(reserve_tokens) is not int or reserve_tokens<1: raise ValueError('Invalid token budget')
         def work():
             if self._rows('SELECT run_id FROM usage WHERE run_id=?',run_id): raise ValueError('Run usage already exists; use a distinct attempt ID')
             now=_now(); day=datetime.fromtimestamp(now/1000,timezone.utc).strftime('%Y-%m-%d')
-            used=self.db.execute("SELECT COALESCE(SUM(CASE WHEN status='reserved' THEN reserved_tokens ELSE input_tokens+output_tokens END),0) FROM usage WHERE day=?",(day,)).fetchone()[0]
-            if used+reserve_tokens>limit: raise ValueError('Daily token budget exceeded')
+            if limit:
+                used=self.db.execute("SELECT COALESCE(SUM(CASE WHEN status='reserved' THEN reserved_tokens ELSE input_tokens+output_tokens END),0) FROM usage WHERE day=?",(day,)).fetchone()[0]
+                if used+reserve_tokens>limit: raise ValueError('Daily token budget exceeded')
             self.db.execute('INSERT INTO usage VALUES (?,?,?,?,?,?,?,?)',(_req(run_id,'Run ID',200),day,reserve_tokens,0,0,'reserved',now,now)); return self._usage(self.db.execute('SELECT * FROM usage WHERE run_id=?',(run_id,)).fetchone())
         return self._tx(work)
     def _usage(self,r): return dict(runId=r['run_id'],day=r['day'],reservedTokens=r['reserved_tokens'],inputTokens=r['input_tokens'],outputTokens=r['output_tokens'],status=r['status'],createdAt=r['created_at'],updatedAt=r['updated_at'])
     def has_usage_capacity(self,limit,reserve_tokens):
+        if limit == 0: return True
         day=datetime.now(timezone.utc).strftime('%Y-%m-%d'); used=self.db.execute("SELECT COALESCE(SUM(CASE WHEN status='reserved' THEN reserved_tokens ELSE input_tokens+output_tokens END),0) FROM usage WHERE day=?",(day,)).fetchone()[0]; return used+reserve_tokens<=limit
     def finish_usage(self,run_id,input_tokens,output_tokens):
         if any(not isinstance(x,int) or x<0 for x in (input_tokens,output_tokens)): raise ValueError('Invalid usage counts')

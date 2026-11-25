@@ -1,5 +1,6 @@
 """Generate the offline project guide from the checked-in documentation."""
 from pathlib import Path
+import argparse
 import json
 import re
 
@@ -34,5 +35,14 @@ module_paths = {'config': 'backend/src/harness/core/config.py', 'server': 'backe
 payload = {'docs': docs, 'modules': modules, 'routes': routes, 'modulePaths': module_paths}
 template = (ROOT / 'docs/project-guide.template.html').read_text(encoding='utf-8')
 output = template.replace('__PROJECT_DATA__', json.dumps(payload, ensure_ascii=True).replace('<', '\\u003c'))
-(ROOT / 'docs/project-guide.html').write_text(output, encoding='utf-8')
-print('Generated docs/project-guide.html')
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--check', action='store_true', help='Check that the committed guide matches its inputs')
+args = parser.parse_args()
+guide = ROOT / 'docs/project-guide.html'
+if args.check:
+    if not guide.is_file() or guide.read_text(encoding='utf-8') != output:
+        parser.exit(1, 'Project guide is stale. Run python scripts/build-project-guide.py.\n')
+    print('Project guide matches its inputs')
+else:
+    guide.write_text(output, encoding='utf-8')
+    print('Generated docs/project-guide.html')
