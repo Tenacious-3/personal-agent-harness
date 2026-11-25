@@ -4,6 +4,7 @@ import { type Api } from "../../api/client";
 import { txt, obj, list, time } from "../../lib/format";
 import { useResource } from "../../hooks/useResource";
 import { useAction } from "../../hooks/useAction";
+import type { Navigate } from "../../app/navigation";
 import {
   Empty,
   Card,
@@ -13,8 +14,8 @@ import {
   Refresh,
 } from "../../components/ui";
 
-export function Workflows({ api }: { api: Api }) {
-  const resource = useResource(api, "/workflows", true);
+export function Workflows({ api, workflowId, navigate }: { api: Api; workflowId?: string; navigate: Navigate }) {
+  const resource = useResource(api, workflowId ? `/workflows/${encodeURIComponent(workflowId)}` : "/workflows", true);
   const templates = useResource(api, "/workflow-templates", true);
   const action = useAction(resource.reload);
   const templateAction = useAction(templates.reload);
@@ -36,9 +37,10 @@ export function Workflows({ api }: { api: Api }) {
     specialists.every((item) => item.role.trim() && item.role.length <= 100 &&
       item.prompt.trim() && item.prompt.length <= 4000);
   const savedTemplates = list(templates.data, "templates");
-  const items = list(resource.data, "workflows");
+  const items = workflowId ? resource.data.id === workflowId ? [resource.data] : [] : list(resource.data, "workflows");
   return (
     <>
+      {workflowId && <Button label="All workflows" onClick={() => navigate("Workflows")} />}
       <Feedback
         loading={resource.loading}
         error={resource.error || action.error || templates.error || templateAction.error}
@@ -154,6 +156,7 @@ export function Workflows({ api }: { api: Api }) {
                 <span>{time(item.createdAt)}</span>
                 <span>GPT-6 Luna · up to 2 agents concurrently</span>
               </div>
+              {!workflowId && <Button label="Inspect workflow" onClick={() => navigate("Workflows", txt(item.id))} />}
               {list(item, "nodes").map((node) => {
                 const task = obj(node.task);
                 return (
@@ -172,6 +175,7 @@ export function Workflows({ api }: { api: Api }) {
                         : "none"}
                     </p>
                     <p>Attempts: {txt(task.attempts)}</p>
+                    <Button label="Inspect specialist task" onClick={() => navigate("Tasks", txt(task.id))} />
                     {Boolean(task.result) && <pre>{txt(task.result)}</pre>}
                     {Boolean(task.error) && (
                       <p className="task-error">{txt(task.error)}</p>

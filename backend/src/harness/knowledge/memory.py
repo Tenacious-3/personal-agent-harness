@@ -6,13 +6,25 @@ import os
 
 async def sync_memory_files(store, workspace):
     from harness.knowledge.documents import MemoryDocuments
+    writes = 0
+
+    async def publish(path, content):
+        nonlocal writes
+        try:
+            current = await workspace.read(path)
+        except (FileNotFoundError, ValueError):
+            current = None
+        if current is None or current['content'] != content:
+            await workspace.write(path, content)
+            writes += 1
+
     memories = store.list_memories()
     curated = ['# Curated memory', '', f'Revision: {store.revision()}', '', 'Edit through the Memory view to preserve provenance.', '']
     for memory in memories:
         curated += [f"## {memory['kind']}: {memory['id']}", '', memory['text'], '',
                     f"Source: {memory['source']}; provenance: {memory['provenance']}; confidence: {memory['confidence']}",
                     'Source IDs: ' + ', '.join(memory['sourceIds']), '']
-    await workspace.write('memory/MEMORY.md', '\n'.join(curated)[:200000])
+    await publish('memory/MEMORY.md', '\n'.join(curated)[:200000])
     dates = {}
     for message in store.list_messages(1000):
         date = datetime.fromtimestamp(message['createdAt'] / 1000, timezone.utc).date().isoformat()
@@ -21,14 +33,14 @@ async def sync_memory_files(store, workspace):
     wanted = ['memory/MEMORY.md']
     for date, notes in dates.items():
         path = f'memory/daily/{date}.md'; wanted.append(path)
-        await workspace.write(path, '\n'.join(notes)[:250000])
+        await publish(path, '\n'.join(notes)[:250000])
     for person in [m for m in memories if m['kind'] == 'person']:
         path = f"memory/people/{person['id']}.md"; wanted.append(path)
-        await workspace.write(path, f"# Person context\n\n{person['text']}\n\nProvenance: {person['provenance']}\nSource IDs: {', '.join(person['sourceIds'])}\n")
+        await publish(path, f"# Person context\n\n{person['text']}\n\nProvenance: {person['provenance']}\nSource IDs: {', '.join(person['sourceIds'])}\n")
     documents=MemoryDocuments(store)
     for row in store.db.execute('SELECT * FROM memory_documents ORDER BY path_key').fetchall():
         doc=documents.decode(row); wanted.append(doc['path'])
-        await workspace.write(doc['path'],documents.render(doc))
+        await publish(doc['path'],documents.render(doc))
     wanted_keys={os.path.normcase(path) for path in wanted}
     for path in set(store.get_setting('managedMemoryFiles') or []) | set(store.get_setting('managedDocumentFiles') or []):
         if os.path.normcase(path) not in wanted_keys and (path.startswith('memory/agent/') or re.fullmatch(r'memory/(daily/\d{4}-\d{2}-\d{2}|people/[a-f0-9-]+)\.md', path)):
@@ -36,7 +48,7 @@ async def sync_memory_files(store, workspace):
             except FileNotFoundError: pass
     store.set_setting('managedMemoryFiles', wanted)
     store.set_setting('managedDocumentFiles',[p for p in wanted if p.startswith('memory/agent/')])
-    return {'files': wanted, 'revision': store.revision(), 'retainedMessageLimit': 1000}
+    return {'files': wanted, 'writes': writes, 'revision': store.revision(), 'retainedMessageLimit': 1000}
 
 
 CONTEXT_CHARACTER_LIMIT = 12000

@@ -1,10 +1,10 @@
-import { useState } from "react";
 import { Button } from "../../components/controls";
 import { TextInput } from "../../components/controls";
 import { type Api } from "../../api/client";
 import { txt, obj, list } from "../../lib/format";
 import { useResource } from "../../hooks/useResource";
 import { useAction } from "../../hooks/useAction";
+import { useDraft } from "../../lib/drafts";
 import {
   Empty,
   Card,
@@ -17,9 +17,13 @@ import {
 export function Goals({ api }: { api: Api }) {
   const resource = useResource(api, "/goals");
   const action = useAction(resource.reload);
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [steps, setSteps] = useState("");
+  const titleDraft = useDraft("goals:title");
+  const descriptionDraft = useDraft("goals:description");
+  const stepsDraft = useDraft("goals:steps");
+  const title = titleDraft.value ?? "";
+  const description = descriptionDraft.value ?? "";
+  const steps = stepsDraft.value ?? "";
+  const discard = () => { titleDraft.write(); descriptionDraft.write(); stepsDraft.write(); };
   const items = list(resource.data, "goals");
   const save = () =>
     void action.run(async () => {
@@ -31,16 +35,14 @@ export function Goals({ api }: { api: Api }) {
           .map((step) => step.trim())
           .filter(Boolean),
       });
-      setTitle("");
-      setDescription("");
-      setSteps("");
+      discard();
     });
   return (
     <>
       <Feedback
         loading={resource.loading}
         error={resource.error || action.error}
-        notice={action.notice}
+        notice={action.notice || titleDraft.warning}
       />
 
       <section className="record-list" aria-label="Your goals">
@@ -119,19 +121,22 @@ export function Goals({ api }: { api: Api }) {
           <TextInput
             label="Goal"
             value={title}
-            onChange={setTitle}
+            onChange={(value) => titleDraft.write(value || undefined)}
+            isDisabled={action.busy}
             placeholder="Prepare for my next interview"
           />
           <Area
             label="What success looks like"
             value={description}
-            onChange={setDescription}
+            onChange={(value) => descriptionDraft.write(value || undefined)}
+            disabled={action.busy}
             rows={2}
           />
           <Area
             label="Starting steps (one per line, optional)"
             value={steps}
-            onChange={setSteps}
+            onChange={(value) => stepsDraft.write(value || undefined)}
+            disabled={action.busy}
             rows={3}
           />
           <Button
@@ -140,6 +145,7 @@ export function Goals({ api }: { api: Api }) {
             isDisabled={action.busy || !title.trim()}
             onClick={save}
           />
+          {(title || description || steps) && <Button label="Discard goal draft" isDisabled={action.busy} onClick={discard} />}
         </form>
       </Card>
     </>

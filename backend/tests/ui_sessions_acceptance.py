@@ -6,6 +6,8 @@ No account credentials or real workspace files are used.
 from contextlib import contextmanager
 from pathlib import Path
 import tempfile
+import asyncio
+import threading
 import time
 import unittest
 
@@ -36,6 +38,140 @@ def temporary_workspace():
 
 
 class SessionUIAcceptance(unittest.TestCase):
+    def test_chat_and_artifact_drafts_survive_navigation_and_refresh(self):
+        with temporary_workspace() as folder:
+            root = Path(folder)
+            config = Config(root=root, data_dir=root / '.assistant', port=0, token=TOKEN,
+                            encryption_secret=TOKEN, frontend_dir=ROOT / 'frontend/dist')
+            with sync_playwright() as playwright, serve(config) as origin:
+                browser = playwright.chromium.launch()
+                try:
+                    page = browser.new_page()
+                    writes = []
+                    page.on('request', lambda request: writes.append(request.url) if request.method == 'POST' else None)
+                    page.goto(origin)
+                    page.get_by_label('Workspace access token').fill(TOKEN)
+                    page.get_by_role('button', name='Connect workspace', exact=True).click()
+                    composer = page.get_by_label('Message your assistant')
+                    composer.fill('Keep main chat draft')
+                    page.get_by_role('button', name='New chat', exact=True).click()
+                    expect(composer).to_have_value('')
+                    composer.fill('Keep side chat draft')
+                    selector = page.get_by_label('Choose chat')
+                    side = selector.input_value()
+                    selector.select_option('legacy')
+                    expect(composer).to_have_value('Keep main chat draft')
+                    navigation = page.get_by_role('navigation', name='Main navigation')
+
+                    def navigate(name):
+                        target = navigation.get_by_role('button', name=name, exact=True)
+                        if not target.is_visible():
+                            navigation.get_by_role('button', name='More tools', exact=True).click()
+                        target.click()
+
+                    navigate('Files')
+                    path = page.get_by_label('Workspace-relative file path')
+                    contents = page.get_by_label('File contents')
+                    path.fill('notes/first.md')
+                    contents.fill('First file draft')
+                    path.fill('notes/second.md')
+                    contents.fill('Second file draft')
+                    navigate('Goals')
+                    page.get_by_label('Goal', exact=True).fill('Keep goal form draft')
+                    page.reload()
+                    expect(page.get_by_label('Goal', exact=True)).to_have_value('Keep goal form draft')
+                    navigate('Chat')
+                    expect(composer).to_have_value('Keep main chat draft')
+                    page.get_by_role('button', name='Discard draft', exact=True).click()
+                    expect(composer).to_have_value('')
+                    selector.select_option(side)
+                    expect(composer).to_have_value('Keep side chat draft')
+                    navigate('Goals')
+                    expect(page.get_by_label('Goal', exact=True)).to_have_value('Keep goal form draft')
+                    navigate('Files')
+                    expect(path).to_have_value('notes/second.md')
+                    expect(contents).to_have_value('Second file draft')
+                    page.get_by_role('button', name='Discard file draft', exact=True).click()
+                    expect(contents).to_have_value('')
+                    path.fill('notes/first.md')
+                    expect(contents).to_have_value('First file draft')
+                    self.assertEqual([url for url in writes if url.endswith(('/chat-turns', '/files', '/goals'))], [])
+                    page.evaluate("() => { Storage.prototype.setItem = () => { throw new DOMException('Full', 'QuotaExceededError'); }; }")
+                    contents.fill('Draft with full storage')
+                    expect(page.get_by_text('Browser storage is unavailable', exact=False)).to_be_visible()
+                    navigate('Chat')
+                    navigate('Files')
+                    expect(contents).to_have_value('Draft with full storage')
+                    print('Per-chat, per-file and goal drafts, refresh, discard, and full browser storage passed')
+                finally:
+                    browser.close()
+
+    def test_chat_reply_reconnects_after_response_loss_and_navigation(self):
+        release = threading.Event()
+        calls = []
+
+        async def runner(config, prompt, context, caps):
+            calls.append(prompt)
+            if prompt == 'Cancel browser reply':
+                await asyncio.Event().wait()
+            while not release.is_set():
+                await asyncio.sleep(0.05)
+            caps.on_usage(3, 3)
+            return 'Durable browser reply'
+
+        def factory(config, store):
+            store.set_setting('nightlyDreamEnabled', False)
+            return Runtime(config, store=store, runner=runner)
+
+        with temporary_workspace() as folder:
+            root = Path(folder)
+            config = Config(root=root, data_dir=root / '.assistant', database_dir=root / 'sqlite', port=0,
+                            token=TOKEN, encryption_secret=TOKEN, api_key='synthetic-model-no-network',
+                            frontend_dir=ROOT / 'frontend/dist')
+            with sync_playwright() as playwright, serve(config, factory) as origin:
+                browser = playwright.chromium.launch()
+                try:
+                    page = browser.new_page()
+                    page.goto(origin)
+                    page.get_by_label('Workspace access token').fill(TOKEN)
+                    page.get_by_role('button', name='Connect workspace', exact=True).click()
+                    composer = page.get_by_label('Message your assistant')
+                    log = page.get_by_role('log', name='Conversation')
+
+                    def lose_response(route):
+                        response = route.fetch()
+                        self.assertEqual(response.status, 202)
+                        route.abort()
+
+                    page.route('**/api/chat-turns', lose_response, times=1)
+                    expect(page.get_by_label('Choose chat')).to_have_value('legacy')
+                    expect(composer).to_be_enabled()
+                    composer.fill('Reconnect browser reply')
+                    page.get_by_role('button', name='Send message', exact=True).click()
+                    expect(page.get_by_role('button', name='Send message', exact=True)).to_be_enabled()
+                    page.get_by_role('button', name='Send message', exact=True).click()
+                    expect(log.get_by_text('Reconnect browser reply', exact=True)).to_have_count(1)
+                    expect(log).to_contain_text('Working on it.')
+                    navigation = page.get_by_role('navigation', name='Main navigation')
+                    navigation.get_by_role('button', name='Memory', exact=True).click()
+                    navigation.get_by_role('button', name='Chat', exact=True).click()
+                    expect(log).to_contain_text('Working on it.')
+                    page.reload()
+                    expect(log).to_contain_text('Working on it.')
+                    release.set()
+                    expect(log.get_by_text('Durable browser reply', exact=True)).to_be_visible()
+                    expect(log.get_by_text('Reconnect browser reply', exact=True)).to_have_count(1)
+
+                    composer.fill('Cancel browser reply')
+                    page.get_by_role('button', name='Send message', exact=True).click()
+                    page.get_by_role('button', name='Cancel reply', exact=True).click()
+                    expect(log).to_contain_text('Reply cancelled')
+                    expect(log.get_by_text('Durable browser reply', exact=True)).to_have_count(1)
+                    self.assertEqual(calls.count('Reconnect browser reply'), 1)
+                    print('Chat response loss, duplicate send, navigation, reload, and cancellation passed in Chromium')
+                finally:
+                    browser.close()
+
     def test_resumable_sessions_and_mobile_layout(self):
         self.assertTrue((ROOT / "frontend/dist/index.html").is_file(), "Build frontend/dist first")
         calls = []

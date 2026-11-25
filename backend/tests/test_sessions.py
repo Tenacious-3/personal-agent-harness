@@ -3,6 +3,7 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from harness.persistence.store import LocalStore
@@ -105,6 +106,56 @@ class SessionRuntimeTests(OfflineAsyncCase):
     asyncTearDown=RuntimeTests.asyncTearDown
     runner=RuntimeTests.runner
     request=RuntimeTests.request
+
+    async def test_chat_request_reuses_durable_failure_and_never_replays_its_proposal(self):
+        calls = []
+
+        async def runner(config, prompt, context, caps):
+            calls.append(prompt)
+            await caps.operate('propose_action', '{"kind":"skill.save","payload":{"name":"turn-test","content":"# Fixture"}}')
+            raise ValueError('Synthetic provider failure')
+
+        self.runtime.runner = runner
+        body = {'message': 'Durable failure marker', 'requestId': 'failed-turn'}
+        for _ in range(2):
+            status, response = await self.request('/chat', body)
+            self.assertEqual(status, 400)
+            self.assertIn('Synthetic provider failure', response['error'])
+        status, conflict = await self.request('/chat-turns', {**body, 'message': 'Different message'})
+        self.assertEqual(status, 409, conflict)
+        status, turn = await self.request('/chat-turns/failed-turn', method='GET')
+        self.assertEqual(status, 200)
+        self.assertEqual(turn['status'], 'failed')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(self.runtime.store.list_approvals()), 1)
+        self.assertEqual(len(self.runtime.store.list_messages()), 1)
+        self.assertEqual(self.runtime.store.list_usage()[0]['runId'], turn['runId'])
+
+    async def test_cancel_and_recover_interruption_without_replaying(self):
+        started = asyncio.Event()
+
+        async def runner(config, prompt, context, caps):
+            started.set()
+            await asyncio.Event().wait()
+
+        self.runtime.runner = runner
+        body = {'message': 'Cancel this reply', 'requestId': 'cancelled-turn'}
+        self.assertEqual((await self.request('/chat-turns', body))[0], 202)
+        await started.wait()
+        self.assertEqual((await self.request('/chat-turns/cancelled-turn/cancel', {}))[1]['status'], 'cancelled')
+        self.assertEqual((await self.request('/chat-turns', body))[1]['status'], 'cancelled')
+        if self.runtime.chat_worker:
+            await self.runtime.chat_worker
+        store = self.runtime.store
+        turns = self.runtime.chat_turns
+        turns.accept('crashed-turn', 'legacy', 'Interrupted request', False)
+        turns.start('crashed-turn', {})
+        with closing(LocalStore(self.runtime.config.database_path)) as reopened:
+            recovered = type(turns)(reopened, ChatSessions(reopened))
+            recovered.recover()
+            self.assertEqual(recovered.get('crashed-turn')['status'], 'interrupted')
+        self.assertEqual((await self.request('/chat-turns', {'message': 'Interrupted request', 'requestId': 'crashed-turn'}))[1]['status'], 'interrupted')
+        self.assertEqual([message['role'] for message in store.list_messages()], ['user', 'user'])
 
     async def test_session_chat_stats_routes_and_template_execution(self):
         status,session=await self.request('/chat-sessions',{'title':'Resume me'})

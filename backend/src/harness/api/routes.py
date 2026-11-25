@@ -1,4 +1,5 @@
 """HTTP operation dispatch; orchestration and durable state live in application services."""
+import asyncio
 import base64
 import json
 import re
@@ -7,7 +8,8 @@ from zoneinfo import ZoneInfo
 from starlette.responses import JSONResponse, Response
 
 from harness.core.utils import text, dump, safe_error
-from harness.knowledge.memory import build_context, build_context_packet
+from harness.application.readiness import check as check_readiness
+from harness.integrations.failures import ConnectorFailure
 
 
 async def dispatch(runtime, method, path, body=None, query=None):
@@ -22,7 +24,15 @@ async def dispatch(runtime, method, path, body=None, query=None):
             if route=='/memory-documents': return JSONResponse(runtime.documents.list(int(query.get('offset',0))))
             if re.fullmatch(r'/memory-documents/[^/]+',route): return JSONResponse(runtime.documents.read(id_))
             if route == '/chat-sessions': return JSONResponse({'sessions':runtime.chats.list(query.get('archived')=='true'), 'defaultSessionId':'legacy', 'modelConfigured':bool(runtime.config.api_key)})
-            if re.fullmatch(r'/chat-sessions/[^/]+/messages',route): return JSONResponse(runtime.chats.messages(id_,query.get('before')))
+            if re.fullmatch(r'/chat-sessions/[^/]+/messages',route):
+                page = runtime.chats.messages(id_, query.get('before'))
+                if query.get('before') is None:
+                    page['latestTurn'] = runtime.chat_turns.latest(id_)
+                return JSONResponse(page)
+            if re.fullmatch(r'/chat-turns/[^/]+', route):
+                turn = runtime.chat_turns.get(id_)
+                if not turn: raise ValueError('Chat turn not found')
+                return JSONResponse(turn)
             if route == '/workflow-templates': return JSONResponse({'templates':runtime.templates.list()})
 
             if route == '/mcp': return JSONResponse({'connections': await runtime.mcp.status()})
@@ -33,7 +43,7 @@ async def dispatch(runtime, method, path, body=None, query=None):
             if route == '/repairs': return JSONResponse({'repairs':runtime.repairs.list()})
             if route == '/freshness': return JSONResponse({'reports':[json.loads(r[0]) for r in runtime.store.db.execute('SELECT report FROM freshness_reports ORDER BY created_at DESC LIMIT 50')]})
             if route == '/status': return JSONResponse(dict(local=True, backend='python', runtimeId=runtime.instance_id, model=runtime.config.model,
-                activity=dict(activeTasks=len(runtime.active), chatBusy=runtime.chat_busy, queuedTasks=sum(t['status'] == 'queued' for t in runtime.store.list_tasks(500))),
+                activity=dict(activeTasks=len(runtime.active), chatBusy=runtime.chat_busy, queuedTasks=runtime.store.task_counts().get('queued', 0)),
                 capabilities=dict(browser=await runtime.browser.status(), google=await runtime.google.status(), workspace=True, docker=runtime.config.docker_enabled),
                 budget=dict(dailyTokenLimit=runtime.config.daily_token_limit, perRunReservation=runtime.config.run_token_reservation, summary=runtime.store.usage_summary(), usage=runtime.store.list_usage())))
             if route == '/history': return JSONResponse({'messages': runtime.store.list_messages(500)})
@@ -45,7 +55,22 @@ async def dispatch(runtime, method, path, body=None, query=None):
                 workflow = runtime.store.get_workflow(id_)
                 if not workflow: raise ValueError('Workflow not found')
                 return JSONResponse(runtime.workflow_view(workflow))
-            for name, getter in [('goals', runtime.store.list_goals), ('tasks', runtime.store.list_tasks), ('schedules', runtime.store.list_schedules), ('approvals', runtime.store.list_approvals), ('notifications', runtime.store.list_notifications), ('events', runtime.store.list_events)]:
+            if route == '/tasks':
+                tasks = runtime.store.task_page(status=query.get('status'), parent_id=query.get('parentId'),
+                                               query=query.get('q', ''), before=query.get('before'), limit=query.get('limit', 100))
+                tasks['tasks'] = [runtime.task_controls(task) if task['status'] == 'failed' else task for task in tasks['tasks']]
+                return JSONResponse({**tasks, 'counts': runtime.store.task_counts()})
+            if re.fullmatch(r'/tasks/[^/]+', route):
+                return JSONResponse(runtime.inspect_task(id_))
+            if route == '/approvals':
+                task_id = query.get('taskId')
+                if task_id and not runtime.store.get_task(task_id): raise ValueError('Task not found')
+                return JSONResponse({'approvals': runtime.store.task_approvals(task_id)[:100] if task_id else runtime.store.list_approvals()})
+            if re.fullmatch(r'/approvals/[^/]+', route):
+                approval = runtime.store.get_approval(id_)
+                if not approval: raise ValueError('Approval not found')
+                return JSONResponse(approval)
+            for name, getter in [('goals', runtime.store.list_goals), ('schedules', runtime.store.list_schedules), ('notifications', runtime.store.list_notifications), ('events', runtime.store.list_events)]:
                 if route == '/' + name: return JSONResponse({name: getter()})
             if route == '/connections': return JSONResponse({'google': await runtime.google.status(), 'providers':await runtime.providers.status()})
             if route == '/google/sheets': return JSONResponse(await runtime.sheets.list())
@@ -62,6 +87,8 @@ async def dispatch(runtime, method, path, body=None, query=None):
                 return JSONResponse(file)
             if route == '/settings': return JSONResponse({'timezone': runtime.store.get_setting('timezone') or 'America/Toronto', 'nightlyDreamEnabled': runtime.store.get_setting('nightlyDreamEnabled') is not False})
         if method == 'POST':
+            if route == '/readiness':
+                return JSONResponse(await check_readiness(runtime, body.get('check', 'local')))
             if route=='/memory-documents':
                 runtime.documents.check_workspace(runtime.workspace,body.get('path'))
                 document=runtime.documents.save(body,owner=True,privacy_revision=body.get('privacyRevision'))
@@ -100,22 +127,16 @@ async def dispatch(runtime, method, path, body=None, query=None):
                 if not runtime.store.get_workflow(id_): raise ValueError('Workflow not found')
                 return JSONResponse(runtime.cancel_task(id_))
             if re.fullmatch(r'/workflows/[^/]+/retry', route): return JSONResponse(runtime.retry_workflow(id_), 202)
-            if route == '/chat':
-                if runtime.chat_busy: return JSONResponse({'error': 'A chat turn is already running'}, 409)
-                message = text(body.get('message')).strip()
-                if not message or len(message) > 12000: raise ValueError('Message must have 1-12000 characters')
-                session_id = body.get('sessionId','legacy')
-                runtime.chats.active(session_id)
-                runtime.chat_busy = True; runtime.active_chat_session = session_id
-                try:
-                    runtime.store.add_message('user',message,session_id=session_id)
-                    packet = build_context_packet(runtime.store,message,session_id=session_id)
-                    result = await runtime.model(message,packet['text'])
-                    runtime.store.add_message('assistant',result,session_id=session_id)
-                    await runtime.project_memory()
-                    return JSONResponse({'message':result,'sessionId':session_id,'context':{k:v for k,v in packet.items() if k!='text'}})
-                finally:
-                    runtime.chat_busy = False; runtime.active_chat_session = None
+            if route in ('/chat', '/chat-turns'):
+                turn, worker = runtime.submit_chat(body)
+                if route == '/chat-turns': return JSONResponse(turn, 202)
+                if worker: await asyncio.shield(worker)
+                turn = runtime.chat_turns.get(turn['id'])
+                if turn['status'] == 'failed': raise ValueError(turn['error'])
+                if turn['status'] != 'succeeded': return JSONResponse(turn, 409)
+                return JSONResponse({**turn, 'message': runtime.chat_turns.message_content(turn['assistantMessageId'])})
+            if re.fullmatch(r'/chat-turns/[^/]+/cancel', route):
+                return JSONResponse(await runtime.cancel_chat(id_))
             if route == '/memories':
                 memory = runtime.store.save_memory(dict(text=text(body.get('text')), kind=body.get('kind') or 'fact', source='user', provenance='explicit'))
                 await runtime.project_memory(); return JSONResponse(memory, 201)
@@ -139,10 +160,10 @@ async def dispatch(runtime, method, path, body=None, query=None):
             if re.fullmatch(r'/tasks/[^/]+/cancel', route): return JSONResponse(runtime.cancel_task(id_))
             if re.fullmatch(r'/tasks/[^/]+/retry', route):
                 task = runtime.store.get_task(id_)
-                workflow_id = id_ if runtime.store.get_workflow(id_) else task.get('parentId') if task and task.get('parentId') and runtime.store.get_workflow(task['parentId']) else None
+                workflow_id = runtime.task_workflow_id(task) if task else None
                 if workflow_id: return JSONResponse(runtime.retry_workflow(workflow_id), 202)
                 if not task or task['status'] != 'failed': raise ValueError('Only a failed task can retry')
-                if any(a['taskId'] == id_ and a['status'] in ('uncertain', 'executing') for a in runtime.store.list_approvals()): raise ValueError('Reconcile uncertain actions before retrying')
+                if runtime.store.has_task_approval(id_, ('uncertain', 'executing')): raise ValueError('Reconcile uncertain actions before retrying')
                 return JSONResponse(runtime.store.update_task(id_, {'status': 'queued', 'error': None}), 202)
             if route == '/actions': return JSONResponse(await runtime.propose_action(text(body.get('kind')), body.get('payload'), text(body.get('summary'))), 201)
             if re.fullmatch(r'/approvals/[^/]+/decision', route):
@@ -213,6 +234,9 @@ async def dispatch(runtime, method, path, body=None, query=None):
                 return JSONResponse({'deleted': True})
             if route == '/connections/google': await runtime.google.disconnect(); return JSONResponse({'ok': True})
         return JSONResponse({'error': 'Not found'}, 404)
+    except ConnectorFailure as error:
+        status = {'throttled': 429, 'unavailable': 503, 'network': 502, 'malformed': 502}.get(error.category, 400)
+        return JSONResponse({'error': str(error), 'category': error.category}, status)
     except Exception as error:
         message = safe_error(error)
         status = 409 if re.search(r'revision conflict|already|expired|changed|pending|digest mismatch', message, re.I) else 404 if re.search(r'not found', message, re.I) else 429 if 'budget' in message.lower() else 400

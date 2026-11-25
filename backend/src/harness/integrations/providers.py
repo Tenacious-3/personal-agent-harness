@@ -16,6 +16,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from harness.integrations.browser import assert_public_browser_url
 from harness.integrations.credentials import CredentialCipher
+from harness.core.utils import ActionPreflightError, safe_error
+from harness.integrations.failures import ConnectorFailure, request_connector, response_failure
 from harness.workspace.files import _retry_sharing_violation
 
 
@@ -101,33 +103,35 @@ class ProviderRegistry:
                 connectionId=record.get('connectionId') if record else None,
                 statusMeaning='Stored authorization last verified at verifiedAt; not a live permission check'))
         return result
-    async def _http(self, method, url, token=None, headers=None, **kwargs):
+    async def _http(self, method, url, token=None, headers=None, *, service='Provider', **kwargs):
         if not self.client: self.client = httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False)
         headers = dict(headers or {})
         if token: headers['Authorization'] = 'Bearer ' + token
         async with self.client.stream(method, url, headers=headers, **kwargs) as response:
-            if response.status_code == 429: raise ValueError('Provider rate limited the request; wait before retrying')
-            if not 200 <= response.status_code < 300: raise ValueError(f'Provider request failed ({response.status_code}); check authorization and scopes')
+            if not response.is_success: raise response_failure(service, response)
             if response.status_code == 204: return {}
             raw = bytearray()
             async for chunk in response.aiter_bytes():
                 raw.extend(chunk)
-                if len(raw) > 1024 * 1024: raise ValueError('Provider response exceeds 1 MiB')
+                if len(raw) > 1024 * 1024: raise ConnectorFailure('malformed', 'Provider response exceeds 1 MiB')
         try: value = json.loads(raw)
-        except Exception: raise ValueError('Provider returned invalid JSON') from None
+        except ValueError: raise ConnectorFailure('malformed', 'Provider returned invalid JSON') from None
         if isinstance(value, dict) and value.get('ok') is False: raise ValueError('Provider rejected operation; check membership and scopes')
         # Defend against an upstream accidentally echoing an access token.
         if token: value = json.loads(json.dumps(value).replace(token, '[redacted]'))
         return value
-    async def _request(self, provider, method, path, record, **kwargs):
+    async def _request(self, provider, method, path, record, *, retry_read=False, **kwargs):
         base = self.base(provider)
         if record.get('origin') != base: raise ValueError('Provider origin changed; reconnect before using credentials')
         if provider == 'mastodon': await self.validate_url(base)
         headers = kwargs.pop('headers', {})
         token = record['access_token']
         if provider == 'shopify': headers['X-Shopify-Storefront-Access-Token'] = token; token = None
-        try: result = await self._http(method, base + path, token, headers, **kwargs)
-        except httpx.HTTPError: raise ValueError('Provider network request failed; check connectivity and authorization') from None
+        async def request():
+            if retry_read and (await self._record(provider))['connectionId'] != record['connectionId']:
+                raise ConnectorFailure('authorization', 'Provider connection changed. Repeat the operation.')
+            return await self._http(method, base + path, token, headers, service=CATALOG[provider]['label'], **kwargs)
+        result = await request_connector(CATALOG[provider]['label'], request, retry_read=retry_read)
         return json.loads(json.dumps(result).replace(record['access_token'], '[redacted]'))
     async def _identity(self, provider, record):
         if provider == 'slack':
@@ -170,20 +174,20 @@ class ProviderRegistry:
                 channel = args.get('channel', '')
                 if not re.fullmatch(r'[CDG][A-Z0-9]{5,30}', channel): raise ValueError('An exact Slack conversation ID is required')
                 params['channel'] = channel
-            result = await self._request(provider, 'GET', path, record, params=params)
+            result = await self._request(provider, 'GET', path, record, params=params, retry_read=True)
             return {k: result[k] for k in ('channels', 'messages', 'has_more', 'response_metadata') if k in result}
         if provider == 'mastodon':
-            posts = await self._request(provider, 'GET', '/api/v1/timelines/home', record, params={'limit': 15})
+            posts = await self._request(provider, 'GET', '/api/v1/timelines/home', record, params={'limit': 15}, retry_read=True)
             return {'posts': [{k:p.get(k) for k in ('id','url','content','created_at','visibility')} for p in posts[:15]], 'contentIsUntrustedHTML': True}
         if provider == 'homeassistant':
             entity = args.get('entityId')
             if not isinstance(entity, str) or not re.fullmatch(r'[a-z_]+\.[a-z0-9_]{1,100}', entity): raise ValueError('Supply one exact entityId; bulk device discovery is not exposed')
-            state = await self._request(provider, 'GET', '/api/states/' + entity, record)
+            state = await self._request(provider, 'GET', '/api/states/' + entity, record, retry_read=True)
             return {k:state.get(k) for k in ('entity_id', 'state', 'last_changed', 'last_updated')}
         query = args.get('query', '')
         if not isinstance(query, str) or len(query) > 500: raise ValueError('Invalid product query')
         document = 'query($q:String!){products(first:10,query:$q){nodes{id title handle onlineStoreUrl availableForSale priceRange{minVariantPrice{amount currencyCode}}}}}'
-        result = await self._request(provider, 'POST', '/api/2026-10/graphql.json', record, json={'query':document,'variables':{'q':query}})
+        result = await self._request(provider, 'POST', '/api/2026-10/graphql.json', record, json={'query':document,'variables':{'q':query}}, retry_read=True)
         if result.get('errors'): raise ValueError('Storefront product query failed')
         return {'products': result.get('data', {}).get('products', {}).get('nodes', []), 'observedAt': int(time.time()*1000), 'checkoutSupported': False}
     async def bind_write(self, kind, payload):
@@ -198,9 +202,13 @@ class ProviderRegistry:
         record = await self._record(provider)
         return {**payload, 'connectionId': record['connectionId'], 'account': record['identity'], 'origin': record['origin']}
     async def execute_write(self, kind, payload, approval_id):
-        provider = kind.split('.')[0]; record = await self._record(provider)
+        provider = kind.split('.')[0]
+        try:
+            record = await self._record(provider)
+        except (ValueError, RuntimeError) as error:
+            raise ActionPreflightError(safe_error(error)) from None
         if payload.get('connectionId') != record['connectionId'] or payload.get('account') != record['identity'] or payload.get('origin') != record['origin']:
-            raise ValueError('Provider account changed; create a new approval')
+            raise ActionPreflightError('Provider account changed; create a new approval')
         if kind == 'slack.send':
             result = await self._request(provider, 'POST', '/api/chat.postMessage', record, json=dict(channel=payload['channel'],
                 text=payload['text'], mrkdwn=False, unfurl_links=False, unfurl_media=False))

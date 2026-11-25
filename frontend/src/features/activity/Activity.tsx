@@ -2,8 +2,10 @@ import { type Api } from "../../api/client";
 import { txt, pretty, list, time, obj } from "../../lib/format";
 import { useResource } from "../../hooks/useResource";
 import { Empty, Card, Feedback, Refresh } from "../../components/ui";
+import { Button } from "../../components/controls";
+import type { Navigate } from "../../app/navigation";
 
-export function Activity({ api }: { api: Api }) {
+export function Activity({ api, navigate }: { api: Api; navigate: Navigate }) {
   const resource = useResource(api, "/events", true);
   const items = list(resource.data, "events");
   return (
@@ -31,10 +33,10 @@ export function Activity({ api }: { api: Api }) {
                 </span>
               </div>
               {Boolean(item.taskId ?? item.task_id) && (
-                <div className="record-meta">
-                  Task: {txt(item.taskId ?? item.task_id)}
-                </div>
+                <Button label="View task" onClick={() => navigate("Tasks", txt(item.taskId ?? item.task_id))} />
               )}
+              {Boolean(obj(item.detail).approvalId) &&
+                <Button label="View approval" onClick={() => navigate("Approvals", txt(obj(item.detail).approvalId))} />}
               {txt(item.type ?? item.kind) === "run.usage" && (
                 <p className="section-description">
                   {txt(obj(item.detail ?? item.data ?? item.payload).inputTokens)} input tokens ·{" "}

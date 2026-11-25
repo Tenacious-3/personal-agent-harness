@@ -187,15 +187,55 @@ PR CI invokes this same image gate under the existing required backend check;
 the frontend check also runs the local, Google and MCP UI scenarios. CI remains
 triggered only by pull-request events, including updates to an open PR.
 
+## Daily model usage
+
+Set `DAILY_TOKEN_LIMIT=0` in `.docker.env` and recreate the app container to
+disable the daily admission cap. Positive values keep the cap. The runtime
+continues to record model usage and the Settings dialog displays the amount
+charged. Provider quota and rate limits still apply.
+
 ## Backup and restore
 
-Container persistence is not a backup. Stop the app cleanly or use SQLite's
-backup API when exporting live data; copying only `assistant.sqlite` while
-ignoring WAL state is not a reliable backup. Preserve the credential encryption
-key separately and test restoration into a separate empty volume. A rollback
-to an app version that predates dcrypt envelopes also needs its matching
-pre-upgrade vault backup. An automated production backup/restore policy is
-still a separate delivery requirement.
+Stop the app with `docker compose stop app` before a workspace backup. The
+backup command uses SQLite's backup API and includes workspace artifacts and
+encrypted connector state. It records the source build, schema, and checksums.
+The dedicated Chromium profile is excluded. Sign in again after a restore.
+
+Run the commands below with the backend environment for the original build.
+For Docker, use Linux/WSL and paths for the stopped container's state mount and
+native database mount. `docker inspect` reports these under `Mounts`. If the
+database lives in the state volume, pass its `assistant.sqlite` there.
+
+```sh
+python -m harness.cli.workspace_backup backup \
+  --state "$state_dir" --database "$database_file" \
+  --archive "$backup_dir/workspace.zip" --build "$source_build"
+
+python -m harness.cli.workspace_backup restore \
+  --archive "$backup_dir/workspace.zip" --target "$new_restore_dir" \
+  --build "$source_build"
+```
+
+Set `source_build` to the original Git commit or immutable image identifier.
+Keep the archive and the original `CREDENTIAL_KEY` separately. Restore obtains
+the key from the environment. Use the original `HARNESS_TOKEN` if the workspace
+used it as the credential key. A successful restore reports SQLite integrity and
+the number of credentials it could unlock offline.
+
+Restore creates `.assistant/` and `database/` under a new directory. To test the
+restored copy, start the original image in a separate Compose project on an
+unused loopback port. Bind those directories to `/data/.assistant` and
+`/database`, set `ASSISTANT_DATABASE_DIR=/database`, and make both writable by
+UID 10001. Use an isolated test configuration with connector access disabled.
+Review conversations, documents, schedules, and approval states before making
+the restored copy active.
+
+Before upgrading, retain a verified archive and its original image. Keep at
+least the latest verified archive and the last pre-upgrade archive until the
+new version passes a restore drill. To roll back, stop the upgraded app and use
+the old image with a new restore of its matching archive. Keep the upgraded
+data directory available until you have verified the rollback. Reconcile any
+external actions that happened after the snapshot before resuming work.
 
 ## Cloudflare boundary
 

@@ -27,6 +27,8 @@ import httpx
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from harness.integrations.credentials import CredentialCipher
+from harness.core.utils import ActionPreflightError, safe_error
+from harness.integrations.failures import ConnectorFailure, request_connector, response_failure
 
 GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
@@ -263,18 +265,21 @@ class GoogleConnector:
             return refreshed["access_token"]
 
     async def _request_json(self, url, *, method="GET", headers=None, data=None, json_body=None):
-        try:
+        async def request():
             async with self._client.stream(method, url, headers=headers, data=data, json=json_body, follow_redirects=False) as response:
-                if not response.is_success: raise RuntimeError(f"Google request failed ({response.status_code}); check authorization and scopes")
+                if not response.is_success: raise response_failure('Google', response)
                 raw = bytearray()
                 async for chunk in response.aiter_bytes():
                     raw.extend(chunk)
-                    if len(raw) > MAX_RESPONSE_BYTES: raise RuntimeError("Google response exceeds 1 MiB; narrow the request")
-            result = json.loads(raw)
-            if not isinstance(result, dict): raise ValueError()
+                    if len(raw) > MAX_RESPONSE_BYTES:
+                        raise ConnectorFailure('malformed', 'Google response exceeds 1 MiB; narrow the request')
+            try:
+                result = json.loads(raw)
+                if not isinstance(result, dict): raise ValueError()
+            except (ValueError, TypeError):
+                raise ConnectorFailure('malformed', 'Google returned invalid data') from None
             return result
-        except (httpx.HTTPError, ValueError, TypeError):
-            raise RuntimeError("Google returned invalid data or could not be reached") from None
+        return await request_connector('Google', request)
 
     async def _api(self, url: str, *, method: str = "GET", json_body: Any = None,
                    required_scope=None, binding=None) -> dict[str, Any]:
@@ -283,14 +288,25 @@ class GoogleConnector:
             or (parsed.netloc == "www.googleapis.com" and parsed.path in ("/calendar/v3/calendars/primary/events", "/drive/v3/files"))
             or (parsed.netloc == "sheets.googleapis.com" and re.fullmatch(r"/v4/spreadsheets/[A-Za-z0-9_-]{10,150}(?:/values/[^/?#]+)?", parsed.path)))
         if parsed.scheme != "https" or not allowed or parsed.fragment: raise ValueError("Unsupported Google endpoint")
-        async with self._connection_lock:
-            record = await self._load()
-            if binding is not None and binding != self._binding(record, required_scope):
-                raise ValueError("Google account changed; create a new approval")
-            token = await self._access(required_scope)
-            result = await self._request_json(url, method=method, json_body=json_body,
-                headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
-            return json.loads(json.dumps(result).replace(token, "[redacted]"))
+        generation = self._generation
+
+        async def request():
+            async with self._connection_lock:
+                try:
+                    if generation != self._generation:
+                        raise ValueError('Google account changed; repeat the operation')
+                    record = await self._load()
+                    if binding is not None and binding != self._binding(record, required_scope):
+                        raise ValueError("Google account changed; create a new approval")
+                    token = await self._access(required_scope)
+                except (ValueError, RuntimeError, httpx.HTTPError) as error:
+                    if method == 'GET': raise
+                    raise ActionPreflightError(safe_error(error)) from None
+                result = await self._request_json(url, method=method, json_body=json_body,
+                    headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+                return json.loads(json.dumps(result).replace(token, "[redacted]"))
+
+        return await request_connector('Google', request, retry_read=method == 'GET')
 
     async def list_mail(self, query: str = "", max_results: int = 10) -> dict[str, Any]:
         if len(query) > 2000:

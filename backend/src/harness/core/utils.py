@@ -3,6 +3,10 @@ import json
 import re
 import time
 
+
+class ActionPreflightError(ValueError):
+    """A local check rejected the action before delivery to the destination."""
+
 def now_ms(): return int(time.time() * 1000)
 def text(value, fallback=''): return value if isinstance(value, str) else fallback
 def dump(value): return json.dumps(value, ensure_ascii=False, separators=(',', ':'))

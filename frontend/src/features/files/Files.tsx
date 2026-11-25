@@ -7,6 +7,7 @@ import { useResource } from "../../hooks/useResource";
 import { useAction } from "../../hooks/useAction";
 import { Card, Feedback, Area } from "../../components/ui";
 import { Icon } from "../../components/Icon";
+import { useDraft } from "../../lib/drafts";
 
 export function Files({ api }: { api: Api }) {
   const [directory, setDirectory] = useState("");
@@ -16,16 +17,19 @@ export function Files({ api }: { api: Api }) {
     `/files?path=${encodeURIComponent(directory)}`,
   );
   const action = useAction();
-  const [path, setPath] = useState("");
-  const [content, setContent] = useState("");
+  const pathDraft = useDraft("files:selected-path");
+  const path = pathDraft.value ?? "";
+  const fileDraft = useDraft(`files:content:${path.trim()}`);
+  const [loaded, setLoaded] = useState({ path: "", content: "" });
+  const content = fileDraft.value ?? (loaded.path === path.trim() ? loaded.content : "");
   const items = list(resource.data, "files");
   const read = (filePath = path) =>
     void action.run(async () => {
       const data = await api(
         `/files/read?path=${encodeURIComponent(filePath)}`,
       );
-      setPath(filePath);
-      setContent(txt(data.content));
+      pathDraft.write(filePath);
+      setLoaded({ path: filePath.trim(), content: txt(data.content) });
     });
   const download = () => {
     const url = URL.createObjectURL(
@@ -44,6 +48,7 @@ export function Files({ api }: { api: Api }) {
         error={resource.error || action.error}
         notice={action.notice}
       />
+      {fileDraft.warning && <Feedback notice={fileDraft.warning} />}
       <Card title="Workspace files">
         <p className="section-description">
           Paths stay inside the assistant workspace. Artifacts display as text;
@@ -77,6 +82,7 @@ export function Files({ api }: { api: Api }) {
             <button
               key={txt(item.path ?? item.name)}
               className="file-entry"
+              disabled={action.busy}
               onClick={() => {
                 const path = txt(item.path ?? item.name);
                 if (item.type === "directory" || item.isDirectory) {
@@ -105,13 +111,15 @@ export function Files({ api }: { api: Api }) {
           <TextInput
             label="Workspace-relative file path"
             value={path}
-            onChange={setPath}
+            onChange={(value) => pathDraft.write(value || undefined)}
+            isDisabled={action.busy}
             placeholder="reports/weekly-plan.md"
           />
           <Area
             label="File contents"
             value={content}
-            onChange={setContent}
+            onChange={(value) => fileDraft.write(value)}
+            disabled={action.busy}
             rows={14}
             maxLength={60000}
           />
@@ -119,8 +127,8 @@ export function Files({ api }: { api: Api }) {
             <Button
               label="Read file"
               variant="secondary"
-              isDisabled={action.busy || !path.trim()}
-              onClick={() => read()}
+              isDisabled={action.busy || !path.trim() || fileDraft.value !== undefined}
+              onClick={() => read(path.trim())}
             />
             <Button
               label="Save file"
@@ -129,10 +137,18 @@ export function Files({ api }: { api: Api }) {
               onClick={() =>
                 void action.run(async () => {
                   await api("/files", { path: path.trim(), content });
+                  setLoaded({ path: path.trim(), content });
+                  fileDraft.write();
                   await resource.reload();
                 }, "File saved in the assistant workspace.")
               }
             />
+            {fileDraft.value !== undefined && <Button
+              label="Discard file draft"
+              variant="secondary"
+              isDisabled={action.busy}
+              onClick={() => fileDraft.write()}
+            />}
             <Button
               label="Download text"
               variant="secondary"

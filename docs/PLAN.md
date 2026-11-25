@@ -38,12 +38,17 @@ same as being live-tested. Do not claim a stage complete without its gate.
 
 The current iteration unifies retained chat, memory, task and specialist results, workflow definitions and recorded action outcomes in local keyword search. The agent uses bounded excerpts and can inspect a specific source. Search requires no model calls. Navigation groups daily work, knowledge, automation and settings. Provider-reported cache usage is recorded separately from total usage; character bounds are not token estimates or guaranteed savings.
 
-Next acceptance gates, in order:
+The local application includes owner-managed MCP connections, explicit per-tool
+grants, encrypted credentials, bounded results and searchable receipts. Docker
+Compose supports persistent state with an optional separate native database bind.
+Conversations are resumable, and owners can inspect context sources and reuse
+saved workflow teams. The November 25 [verification index](VERIFICATION.md)
+records the scope of local checks.
 
-1. Add an owner-managed MCP connection registry with explicit per-tool grants, encrypted credentials, connection tests and bounded results. Keep remote tool requests behind the same authorization and approval policy. Do not inherit Codex app connections or treat server read-only hints as permission. Test timeout, credential redaction, tool changes, malicious content and reconnect behavior against a local fixture before enabling a real server. Retain attributable tool-result receipts so recall can find those results. MCP connections are now implemented with owner discovery/grants, encrypted storage, schema-bound reviewed calls and searchable result receipts; see MCP.md for supported schemas and protocol limits.
-2. Provide reproducible Docker Compose development with persistent SQLite/workspace/browser volumes, local-only published ports, explicit container bind/host validation, health checks and startup migrations. Prove restart/recovery, approvals, browser isolation and UI acceptance inside containers. The optional Docker script executor is separate from containerizing the application.
-3. Add resumable chat sessions, user-visible context/source usage, reusable workflow templates and measured recall evaluations. Existing retained messages remain a single conversation stream; no imported external chats or Codex subagent history is available.
-4. Only after the container gate passes, build and validate Cloudflare Workers adapters for durable state, browser/execution and private credentials, plus authenticated owner access. Cloudflare deployment is the last stage; this local Python process cannot be assumed to run unchanged inside Workers.
+The [prioritized issue tracker](https://github.com/Tenacious-3/personal-agent-harness/issues/30)
+tracks the remaining reliability and product work. Cloudflare durable adapter
+design is tracked under [#28](https://github.com/Tenacious-3/personal-agent-harness/issues/28).
+Actual account setup and hosted deployment remain deferred.
 
 A release needs passing backend and Chromium acceptance tests plus frontend checks. Live Google/MCP authorization, model spending and hosted deployment require their own explicit verification; fixture tests do not prove live service connectivity.
 
@@ -127,7 +132,7 @@ facts about Muse's internal implementation.
 | Alignment dreams | Read-only synthesis proposals and reviewed revision-safe application; no automatic rewritten system prompt |
 | Proactive delivery | Explicit reminders vs changes-only delivery with per-source re-reading, bounded claim-support review and repair records; full factual guarantees and closed-app push remain open |
 | Deferred namespaces | A bounded operation dispatcher exists; true on-demand SDK schema loading remains open |
-| Side chats and messaging | Not implemented; require separate thread state and provider-specific messaging authorization |
+| Side chats and messaging | Local side conversations support rename, archive, restore and retained history. Provider messaging has separate account authorization and action review. |
 | Rich documents/media | Text/web artifacts exist; PDF/Office generators and media providers remain open |
 | Commerce and phones | Not implemented; provider/payment/device setup and stronger per-action review would be required |
 
@@ -176,14 +181,10 @@ runtime compatibility, deployed authentication or hosted persistence.
 
 ## Owner-requested backlog: implement later
 
-After the UI work merged, the owner resumed project work on November 18, 2026.
-The memory-document foundation (#8) is now being implemented in PR #13. Daily
-dreams (#9) and context import (#10) follow that foundation. Actual Cloudflare
-account and deployment setup remains deferred.
-
-The owner requested detailed issues and explicitly deferred implementing these
-features. Keep them as backlog until the owner resumes that work; do not treat
-the active general project goal as permission to silently start these items.
+The agent-managed memory document foundation shipped in
+[#13](https://github.com/Tenacious-3/personal-agent-harness/pull/13). Daily dreams
+and context import build on that foundation. Actual Cloudflare account and
+deployment setup remains deferred.
 
 - [#8 Agent-managed memory documents](https://github.com/Tenacious-3/personal-agent-harness/issues/8): the agent chooses and maintains multiple sourced files from conversations and events.
 - [#9 Daily local-time dreams](https://github.com/Tenacious-3/personal-agent-harness/issues/9): dated dream files at 3 a.m. in the user's location-based timezone, with DST/restart/catch-up behavior.

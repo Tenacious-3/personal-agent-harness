@@ -6,14 +6,14 @@ import { session, setSession } from "../../lib/session";
 import { useResource } from "../../hooks/useResource";
 import { useAction } from "../../hooks/useAction";
 import { Empty, Card, Feedback } from "../../components/ui";
-import { type View } from "../../app/navigation";
+import { type Navigate } from "../../app/navigation";
 
 export function Inbox({
   api,
   navigate,
 }: {
   api: Api;
-  navigate: (view: View) => void;
+  navigate: Navigate;
 }) {
   const resource = useResource(api, "/notifications", true);
   const action = useAction(resource.reload);
@@ -99,9 +99,9 @@ export function Inbox({
               <p>{txt(item.body ?? item.message)}</p>
               {Boolean(item.taskId) && (
                 <Button
-                  label="View tasks"
+                  label="View task"
                   variant="ghost"
-                  onClick={() => navigate("Tasks")}
+                  onClick={() => navigate("Tasks", txt(item.taskId))}
                 />
               )}
             </div>

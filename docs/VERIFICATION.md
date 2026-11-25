@@ -1,5 +1,31 @@
 # Verification ledger
 
+## Current verification index — November 25, 2026
+
+The `codex/fix-audit-backlog` work starts from `origin/main` at `fdb5655`.
+That baseline includes local side conversations, saved workflow teams, sourced
+memory documents, MCP grants, and the native SQLite directory for Docker.
+
+- The isolated browser scenarios cover chat recovery after a dropped response,
+  cancellation, draft recovery, retained task and approval navigation, owner
+  document review, and reopening a restored conversation from a separate workspace.
+- The container gate exercises authenticated HTTP, exact approval and replay
+  protection, scheduling, dedicated Chromium policy, and the persistent SQLite
+  bind through restart and container recreation. Run it on Linux/WSL with
+  `python3 scripts/container-smoke.py --build --bind-database`.
+- Local fixtures use real application code, Chromium and SQLite with synthetic
+  responses. The dated live model and browser observations below apply to their
+  recorded versions. Current real-account consent and hosted deployment require
+  separate verification.
+- [Daily dreams](https://github.com/Tenacious-3/personal-agent-harness/issues/9),
+  [context import](https://github.com/Tenacious-3/personal-agent-harness/issues/10),
+  [Docker manual takeover](https://github.com/Tenacious-3/personal-agent-harness/issues/24),
+  and [Cloudflare adapter conformance](https://github.com/Tenacious-3/personal-agent-harness/issues/28)
+  are tracked independently.
+
+The sections below record earlier runs using the commands and capabilities of
+their respective versions.
+
 ## Google Workspace expansion — November 13, 2026
 
 Adapted the reference `jarvis-parallax` account-bound Google structure to this

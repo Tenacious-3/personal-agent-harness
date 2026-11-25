@@ -2,25 +2,33 @@ import { useState } from "react";
 import { Button } from "../../components/controls";
 import { TextInput } from "../../components/controls";
 import { type Api } from "../../api/client";
-import { txt, list, time } from "../../lib/format";
+import { txt, list, obj, time } from "../../lib/format";
 import { useResource } from "../../hooks/useResource";
 import { useAction } from "../../hooks/useAction";
 import { Empty, Card, Status, Feedback, Area } from "../../components/ui";
-import { type View } from "../../app/navigation";
+import { type Navigate } from "../../app/navigation";
 
 export function Tasks({
   api,
   navigate,
+  selected,
 }: {
   api: Api;
-  navigate: (view: View) => void;
+  navigate: Navigate;
+  selected?: string;
 }) {
-  const resource = useResource(api, "/tasks", true);
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("");
+  const [pages, setPages] = useState<string[]>([]);
+  const params = new URLSearchParams({ q: query, status, limit: "25" });
+  if (pages.length) params.set("before", pages[pages.length - 1]);
+  const resource = useResource(api, selected ? `/tasks/${encodeURIComponent(selected)}` : `/tasks?${params}`, true);
   const action = useAction(resource.reload);
   const [prompt, setPrompt] = useState("");
   const [editing, setEditing] = useState("");
   const [memory, setMemory] = useState("");
-  const items = list(resource.data, "tasks");
+  const items = selected ? (resource.data.id === selected ? [resource.data] : []) : list(resource.data, "tasks");
+  const counts = obj(resource.data.counts);
   return (
     <>
       <Feedback
@@ -66,7 +74,22 @@ export function Tasks({
           />
         </div>
       </Card>
-      <section className="record-list">
+      <Card title="Task history">
+        {selected ? <Button label="Back to task history" onClick={() => navigate("Tasks")} /> : <>
+          <div className="inline-form">
+            <TextInput label="Search tasks" value={query} onChange={(value) => { setQuery(value.slice(0, 200)); setPages([]); }} />
+            <label className="native-field">Status
+              <select aria-label="Task status" value={status} onChange={(event) => { setStatus(event.target.value); setPages([]); }}>
+                <option value="">All statuses</option>
+                {['queued', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled'].map((value) =>
+                  <option key={value} value={value}>{value.replaceAll('_', ' ')}</option>)}
+              </select>
+            </label>
+          </div>
+          {resource.data.counts && <p>{Number(counts.queued) || 0} queued · {Number(counts.running) || 0} running · {Number(counts.waiting_approval) || 0} waiting for approval</p>}
+        </>}
+      </Card>
+      <section className="record-list" aria-label="Retained tasks">
         {!items.length && !resource.loading && (
           <Empty title="A clear slate.">
             Background tasks and dream results appear here.
@@ -83,6 +106,8 @@ export function Tasks({
                 <span>{txt(item.kind)}</span>
                 <span>{time(item.createdAt ?? item.created_at)}</span>
                 {Boolean(item.goalId) && <span>Goal: {txt(item.goalId)}</span>}
+                {Boolean(item.parentId) && <span>Parent: {txt(item.parentId)}</span>}
+                {selected && <span>Task ID: {selected}</span>}
               </div>
               {Boolean(item.result) && (
                 <details>
@@ -97,9 +122,22 @@ export function Tasks({
                 <Button
                   label="Review pending actions"
                   variant="secondary"
-                  onClick={() => navigate("Approvals")}
+                  onClick={() => navigate("Approvals", txt(item.id), "task")}
                 />
               )}
+              <div className="button-row">
+                {!selected && <Button label="Inspect task" onClick={() => navigate("Tasks", txt(item.id))} />}
+                {['queued', 'running', 'waiting_approval', 'failed'].includes(txt(item.status)) && <Button
+                  label="Cancel task" isDisabled={action.busy}
+                  onClick={() => void action.run(() => api(`/tasks/${encodeURIComponent(txt(item.id))}/cancel`, {}))}
+                />}
+                {item.status === 'failed' && <Button
+                  label="Retry task (may use model tokens)" isDisabled={action.busy || item.requiresReconciliation === true}
+                  onClick={() => void action.run(() => api(`/tasks/${encodeURIComponent(txt(item.id))}/retry`, {}))}
+                />}
+              </div>
+              {item.requiresReconciliation === true && <Button label="Review action outcome before retrying" onClick={() => navigate("Approvals", txt(item.id), "task")} />}
+              {Boolean(item.parentId) && selected && <Button label="Open parent task" onClick={() => navigate("Tasks", txt(item.parentId))} />}
               {item.kind === "dream" &&
                 item.status === "completed" &&
                 Boolean(item.result) && (
@@ -147,6 +185,10 @@ export function Tasks({
           </article>
         ))}
       </section>
+      {!selected && <div className="button-row">
+        {pages.length > 0 && <Button label="Newer tasks" onClick={() => setPages((current) => current.slice(0, -1))} />}
+        {Boolean(resource.data.nextBefore) && <Button label="Older tasks" onClick={() => setPages((current) => [...current, txt(resource.data.nextBefore)])} />}
+      </div>}
     </>
   );
 }

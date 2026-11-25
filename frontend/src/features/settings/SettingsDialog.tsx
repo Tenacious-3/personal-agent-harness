@@ -78,7 +78,7 @@ function SettingsContent({ api, mode, onModeChange, onNavigate, onClose, onDisco
             <div className="settings-section-heading"><h4>Daily budget</h4><span>UTC{summary.day ? ` · ${txt(summary.day)}` : ""}</span></div>
             <p className="settings-muted">Model token usage in your local runtime.</p>
             {status.loading ? <p role="status">Loading usage…</p> : <>
-              <div className="settings-budget-total"><strong>{count(charged)}</strong><span> / {count(limit)} tokens charged</span></div>
+              <div className="settings-budget-total"><strong>{count(charged)}</strong><span>{limit === 0 ? " tokens charged · No daily cap" : ` / ${count(limit)} tokens charged`}</span></div>
               {percentage !== undefined && <progress className="settings-budget-progress" value={percentage} max={100} aria-label="Daily token budget charged" />}
               <dl className="settings-usage-grid">
                 <div><dt>Input tokens</dt><dd>{count(summary.inputTokens)}</dd></div>

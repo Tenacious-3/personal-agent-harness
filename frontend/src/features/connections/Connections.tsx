@@ -9,6 +9,7 @@ import { ProviderConnections } from "../connections/ProviderConnections";
 import { GoogleSheets } from "./GoogleSheets";
 import { MCPConnections } from "./MCPConnections";
 import { type View } from "../../app/navigation";
+import { Readiness } from "./Readiness";
 
 export function Connections({ api, runtime, navigate }: { api: Api; runtime: Item; navigate: (view: View) => void }) {
   const resource = useResource(api, "/connections");
@@ -106,6 +107,7 @@ export function Connections({ api, runtime, navigate }: { api: Api; runtime: Ite
         <GoogleSheets key={txt(google.connectionId)} api={api} google={google} openApprovals={() => navigate("Approvals")} />}
       <ProviderConnections api={api} />
       <MCPConnections api={api} />
+      <Readiness api={api} />
       <Card title="Runtime capabilities">
         <p className="section-description">
           Only capabilities reported by this runtime are listed. Additional

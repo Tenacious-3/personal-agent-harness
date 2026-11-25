@@ -4,6 +4,7 @@ import { type Api, type Item } from "../../api/client";
 import { txt, pretty, list, time } from "../../lib/format";
 import { useResource } from "../../hooks/useResource";
 import { useAction } from "../../hooks/useAction";
+import type { Navigate } from "../../app/navigation";
 import {
   Empty,
   Card,
@@ -66,12 +67,16 @@ function ReconcileAction({
   );
 }
 
-export function Approvals({ api }: { api: Api }) {
-  const resource = useResource(api, "/approvals", true);
+export function Approvals({ api, recordId, recordKind, navigate }: { api: Api; recordId?: string; recordKind?: string; navigate: Navigate }) {
+  const exactApproval = recordId && recordKind !== "task";
+  const resource = useResource(api, recordId
+    ? exactApproval ? `/approvals/${encodeURIComponent(recordId)}` : `/approvals?taskId=${encodeURIComponent(recordId)}`
+    : "/approvals", true);
   const action = useAction(resource.reload);
-  const items = list(resource.data, "approvals");
+  const items = exactApproval ? resource.data.id === recordId ? [resource.data] : [] : list(resource.data, "approvals");
   return (
     <>
+      {recordId && <Button label="All approvals" onClick={() => navigate("Approvals")} />}
       <Feedback
         loading={resource.loading}
         error={resource.error || action.error}
@@ -103,6 +108,10 @@ export function Approvals({ api }: { api: Api }) {
                 <span>Expires: {time(item.expiresAt)}</span>
               </div>
               <pre>{pretty(item.payload)}</pre>
+              <div className="button-row">
+                {!exactApproval && <Button label="Inspect approval" onClick={() => navigate("Approvals", txt(item.id))} />}
+                {Boolean(item.taskId) && <Button label="View task" onClick={() => navigate("Tasks", txt(item.taskId))} />}
+              </div>
               <details>
                 <summary>Action fingerprint</summary>
                 <code className="break-text">{txt(item.digest)}</code>
