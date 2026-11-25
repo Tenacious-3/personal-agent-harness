@@ -251,6 +251,19 @@ class RuntimeTests(OfflineAsyncCase):
         self.assertEqual(result['status'], 'uncertain'); self.assertEqual(self.browser.click.await_count, 1)
         self.assertEqual((await self.request('/tasks', {'prompt': 'Unrelated task'}))[0], 202)
 
+    async def test_container_does_not_offer_an_unreachable_manual_browser_window(self):
+        self.config.container_mode = True
+        self.browser.launch = AsyncMock(return_value={'active': True})
+        _, status = await self.request('/browser/status')
+        self.assertFalse(status['manualLoginAvailable'])
+        self.assertEqual((await self.request('/browser/launch', {'visible': True}))[0], 409)
+        self.browser.launch.assert_not_awaited()
+        self.assertEqual((await self.request('/browser/launch', {'visible': False}))[0], 200)
+        self.browser.launch.assert_awaited_once_with(visible=False)
+        self.config.container_mode = False
+        _, status = await self.request('/browser/status')
+        self.assertTrue(status['manualLoginAvailable'])
+
     async def test_workflow_join_parallel_results_and_one_final_receipt(self):
         gates = []; calls = []
         async def runner(config, prompt, context, caps):

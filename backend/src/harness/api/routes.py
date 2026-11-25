@@ -74,7 +74,9 @@ async def dispatch(runtime, method, path, body=None, query=None):
                 if route == '/' + name: return JSONResponse({name: getter()})
             if route == '/connections': return JSONResponse({'google': await runtime.google.status(), 'providers':await runtime.providers.status()})
             if route == '/google/sheets': return JSONResponse(await runtime.sheets.list())
-            if route == '/browser/status': return JSONResponse(await runtime.browser.status())
+            if route == '/browser/status':
+                status = await runtime.browser.status()
+                return JSONResponse({**status, 'manualLoginAvailable': not runtime.config.container_mode})
             if route == '/browser/tabs': return JSONResponse({'tabs': await runtime.browser.tabs()})
             if route == '/browser/snapshot': return JSONResponse(await runtime.browser.snapshot(query.get('tabId', '')))
             if route == '/browser/screenshot': return Response(base64.b64decode((await runtime.browser.screenshot(query.get('tabId', '')))['base64']), media_type='image/png')
@@ -176,7 +178,11 @@ async def dispatch(runtime, method, path, body=None, query=None):
                 runtime.store.append_event('action.reconciled', {'approvalId': id_, 'outcome': approval['status'], 'verifiedBy': 'user'}, approval['taskId'])
                 runtime.resume_task(approval['taskId']); return JSONResponse(approval)
             if re.fullmatch(r'/notifications/[^/]+/read', route): runtime.store.mark_read(id_); return JSONResponse({'ok': True})
-            if route == '/browser/launch': return JSONResponse(await runtime.browser.launch(visible=body.get('visible') is True))
+            if route == '/browser/launch':
+                visible = body.get('visible') is True
+                if visible and runtime.config.container_mode:
+                    return JSONResponse({'error': 'Manual browser sign-in is unavailable in this Docker setup.'}, 409)
+                return JSONResponse(await runtime.browser.launch(visible=visible))
             if route == '/browser/close': await runtime.browser.close(); return JSONResponse({'ok': True})
             if route == '/browser/navigate': return JSONResponse(await runtime.browser.navigate(text(body.get('url'))))
             if route == '/files':

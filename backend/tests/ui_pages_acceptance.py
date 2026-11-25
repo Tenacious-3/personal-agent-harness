@@ -21,6 +21,30 @@ PAGES = ("Goals", "Memory", "History", "People", "Repairs", "Evidence",
 
 
 class PagesUIAcceptance(unittest.TestCase):
+    def test_docker_browser_explains_manual_sign_in_availability(self):
+        with tempfile.TemporaryDirectory(prefix="harness-browser-control-ui-") as folder:
+            root = Path(folder)
+            config = Config(root=root, data_dir=root / '.assistant', port=0, token=TOKEN,
+                            encryption_secret=TOKEN, container_mode=True,
+                            frontend_dir=ROOT / 'frontend/dist')
+            with serve(config) as origin, sync_playwright() as playwright:
+                browser = playwright.chromium.launch()
+                try:
+                    page = browser.new_page()
+                    page.goto(origin)
+                    page.get_by_label('Workspace access token').fill(TOKEN)
+                    page.get_by_role('button', name='Connect workspace', exact=True).click()
+                    nav = page.get_by_role('navigation', name='Main navigation')
+                    tool = nav.get_by_role('button', name='Browser', exact=True)
+                    if not tool.is_visible():
+                        nav.get_by_role('button', name='More tools', exact=True).click()
+                    tool.click()
+                    expect(page.get_by_text('Manual browser sign-in is unavailable in this Docker setup.', exact=False)).to_be_visible()
+                    expect(page.get_by_role('button', name='Open browser window', exact=True)).to_have_count(0)
+                    expect(page.get_by_role('button', name='Start browser', exact=True)).to_be_visible()
+                finally:
+                    browser.close()
+
     def test_every_page_themes_navigation_and_small_screens(self):
         with tempfile.TemporaryDirectory(prefix="harness-pages-ui-") as folder:
             root = Path(folder)

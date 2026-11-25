@@ -110,10 +110,12 @@ export function Browser({
         }
       >
         <p className="section-description">
-          This profile is separate from your everyday browser. Open its window
-          to sign in manually. Never enter passwords, payment details, or
-          verification codes in chat or action controls.
+          This profile is separate from your everyday browser.
+          {status.data.manualLoginAvailable === true && " Open its window to sign in manually. Enter passwords and verification codes there."}
         </p>
+        {status.data.manualLoginAvailable === false && (
+          <p className="section-description">Manual browser sign-in is unavailable in this Docker setup. Headless browsing is available.</p>
+        )}
         <div className="button-row">
           <Button
             label="Start browser"
@@ -121,18 +123,18 @@ export function Browser({
             isDisabled={action.busy}
             onClick={() => launch(false)}
           />
-          <Button
+          {status.data.manualLoginAvailable === true && <Button
             label="Open browser window"
             variant="secondary"
             isDisabled={action.busy}
             onClick={() => launch(true)}
-          />
-          <Button
+          />}
+          {Boolean(status.data.manualControl) && <Button
             label="Return browser control"
             variant="secondary"
             isDisabled={action.busy || !status.data.active}
             onClick={() => launch(false)}
-          />
+          />}
           <Button
             label="Close browser"
             variant="ghost"
