@@ -80,6 +80,7 @@ class Runtime:
         self.privacy_epoch = 0
         self.timer = None
         self.projection_lock = asyncio.Lock()
+        self._document_projection_cache = {}
         self.store.append_event('runtime.recovery', self.store.recover_interrupted())
 
     async def start(self):
@@ -114,12 +115,26 @@ class Runtime:
         self.store.close()
 
     async def project_memory(self):
-        self.store.set_setting('memoryProjectionStale',True)
         async with self.projection_lock:
+            self.store.set_setting('memoryProjectionStale', True)
             try:
                 for _ in range(3):
                     snapshot=(self.store.revision(),self.store.get_setting('documentGeneration'))
-                    report = await sync_memory_files(self.store, self.workspace)
+                    projection = asyncio.create_task(
+                        sync_memory_files(self.store, self.workspace, self._document_projection_cache)
+                    )
+                    try:
+                        report = await asyncio.shield(projection)
+                    except asyncio.CancelledError:
+                        # A file write can outlive its awaiting caller. Keep the
+                        # lock until it settles so a forget can safely remove it.
+                        settled = asyncio.gather(projection, return_exceptions=True)
+                        while not settled.done():
+                            try:
+                                await asyncio.shield(settled)
+                            except asyncio.CancelledError:
+                                continue
+                        raise
                     if snapshot==(self.store.revision(),self.store.get_setting('documentGeneration')):
                         self.store.set_setting('memoryProjectionStale', False)
                         return report
