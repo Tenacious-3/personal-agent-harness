@@ -83,7 +83,8 @@ def main():
             response = error
         with response:
             raw = response.read()
-            if response.status != expected:
+            statuses = expected if isinstance(expected, tuple) else (expected,)
+            if response.status not in statuses:
                 raise AssertionError(f"{path}: expected HTTP {expected}, got {response.status}")
             return json.loads(raw) if raw else None
 
@@ -167,6 +168,11 @@ def main():
                         {'kind': 'text', 'value': 'fixture-only-value'}, {'kind': 'key', 'value': 'Enter'}):
             frame = request('/api/browser/manual/frame', {'lease': lease})
             request('/api/browser/manual/input', {'lease': lease, 'frame': frame['frame'], **command})
+        deadline = time.monotonic() + 10
+        while request('/api/browser/manual/frame', {'lease': lease}, expected=(200, 409)).get('title') != 'Fixture signed in':
+            if time.monotonic() >= deadline:
+                raise AssertionError('Synthetic sign-in did not reach the signed-in page')
+            time.sleep(.1)
         request('/api/browser/manual/end', {'lease': lease})
         verify_browser_login()
         verify_persisted(memory["id"], approval["id"], schedule["id"],document['id'])

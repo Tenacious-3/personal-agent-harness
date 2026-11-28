@@ -27,6 +27,7 @@ export function ManualBrowser({ api, lease, onEnd }: { api: Api; lease: string; 
     <Feedback error={action.error} loading={action.busy} />
     {frame && <>
       <p>Current site <strong>{txt(frame.origin)}</strong></p>
+      {Boolean(frame.title) && <p>{txt(frame.title)}</p>}
       <img
         className="browser-screenshot manual-browser-view"
         alt="Interactive view of the current dedicated browser tab"

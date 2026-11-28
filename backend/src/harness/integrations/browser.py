@@ -300,6 +300,7 @@ class BrowserService:
                 navigation = self._manual_navigation
                 await assert_public_browser_url(url)
                 size = page.viewport_size
+                title = await page.title()
                 data = await page.screenshot(type="jpeg", quality=75, timeout=4000)
                 self._check_manual(lease)
                 if self._manual_navigation != navigation or page.url != url or not size:
@@ -311,7 +312,7 @@ class BrowserService:
             self._manual_sequence += 1
             self._manual_frame = (self._manual_sequence, url, size, navigation)
             return {"frame": self._manual_sequence, "image": base64.b64encode(data).decode("ascii"),
-                    "origin": urlsplit(url).hostname, **size}
+                    "origin": urlsplit(url).hostname, "title": title[:160], **size}
 
     async def manual_input(self, lease, body):
         async with self._lock:

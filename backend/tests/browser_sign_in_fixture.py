@@ -20,7 +20,7 @@ class SignInRoute:
             if signed_in:
                 response_headers["Set-Cookie"] = "fixture=approved; Secure; Max-Age=3600; Path=/"
         if signed_in:
-            body = "<h1>Fixture signed in</h1>"
+            body = "<title>Fixture signed in</title><h1>Fixture signed in</h1>"
         else:
             body = ('<form method="post" style="position:absolute;left:100px;top:100px;">'
                     '<input type="password" name="proof"><button>Sign in</button></form>')

@@ -78,6 +78,7 @@ class PagesUIAcceptance(unittest.TestCase):
                         refresh = page.get_by_role('button', name='Refresh browser view', exact=True)
                         refresh.click()
                         expect(view).to_be_visible()
+                        expect(page.get_by_text('Fixture signed in', exact=True)).to_be_visible()
                         page.get_by_role('button', name='End sign-in and return control', exact=True).click()
                         expect(view).to_have_count(0)
                         self.assertFalse(api.get('/api/browser/status').json()['manualControl'])
