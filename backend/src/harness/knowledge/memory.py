@@ -1,54 +1,101 @@
 """Readable projections and bounded context. SQLite is authoritative."""
 from datetime import datetime, timezone
-import re
+import hashlib
 import os
+import re
 
 
-async def sync_memory_files(store, workspace):
+async def sync_memory_files(store, workspace, document_cache=None):
+    """Publish managed files using a per-runtime cache of note identities and digests."""
     from harness.knowledge.documents import MemoryDocuments
-    writes = 0
 
-    async def publish(path, content):
-        nonlocal writes
-        try:
-            current = await workspace.read(path)
-        except (FileNotFoundError, ValueError):
-            current = None
-        if current is None or current['content'] != content:
-            await workspace.write(path, content)
-            writes += 1
+    def snapshot():
+        return store.revision(), store.get_setting('documentGeneration')
 
+    def digest(content):
+        return hashlib.sha256(content.encode('utf-8')).digest()
+
+    revision = snapshot()
+    if document_cache is None:
+        document_cache = {}
     memories = store.list_memories()
-    curated = ['# Curated memory', '', f'Revision: {store.revision()}', '', 'Edit through the Memory view to preserve provenance.', '']
+    curated = ['# Curated memory', '', f'Revision: {revision[0]}', '', 'Edit through the Memory view to preserve provenance.', '']
     for memory in memories:
         curated += [f"## {memory['kind']}: {memory['id']}", '', memory['text'], '',
                     f"Source: {memory['source']}; provenance: {memory['provenance']}; confidence: {memory['confidence']}",
                     'Source IDs: ' + ', '.join(memory['sourceIds']), '']
-    await publish('memory/MEMORY.md', '\n'.join(curated)[:200000])
+    content_by_path = {'memory/MEMORY.md': '\n'.join(curated)[:200000]}
     dates = {}
     for message in store.list_messages(1000):
         date = datetime.fromtimestamp(message['createdAt'] / 1000, timezone.utc).date().isoformat()
         dates.setdefault(date, [f'# Daily notes: {date}', '', 'Raw retained conversation excerpts; not curated memory.', ''])
         dates[date] += [f"## {message['role']} - {message['id']}", '', message['content'], '']
-    wanted = ['memory/MEMORY.md']
     for date, notes in dates.items():
-        path = f'memory/daily/{date}.md'; wanted.append(path)
-        await publish(path, '\n'.join(notes)[:250000])
+        content_by_path[f'memory/daily/{date}.md'] = '\n'.join(notes)[:250000]
     for person in [m for m in memories if m['kind'] == 'person']:
-        path = f"memory/people/{person['id']}.md"; wanted.append(path)
-        await publish(path, f"# Person context\n\n{person['text']}\n\nProvenance: {person['provenance']}\nSource IDs: {', '.join(person['sourceIds'])}\n")
-    documents=MemoryDocuments(store)
-    for row in store.db.execute('SELECT * FROM memory_documents ORDER BY path_key').fetchall():
-        doc=documents.decode(row); wanted.append(doc['path'])
-        await publish(doc['path'],documents.render(doc))
-    wanted_keys={os.path.normcase(path) for path in wanted}
-    for path in set(store.get_setting('managedMemoryFiles') or []) | set(store.get_setting('managedDocumentFiles') or []):
-        if os.path.normcase(path) not in wanted_keys and (path.startswith('memory/agent/') or re.fullmatch(r'memory/(daily/\d{4}-\d{2}-\d{2}|people/[a-f0-9-]+)\.md', path)):
-            try: await workspace.remove(path)
-            except FileNotFoundError: pass
-    store.set_setting('managedMemoryFiles', wanted)
-    store.set_setting('managedDocumentFiles',[p for p in wanted if p.startswith('memory/agent/')])
-    return {'files': wanted, 'writes': writes, 'revision': store.revision(), 'retainedMessageLimit': 1000}
+        content_by_path[f"memory/people/{person['id']}.md"] = (
+            f"# Person context\n\n{person['text']}\n\nProvenance: {person['provenance']}\nSource IDs: {', '.join(person['sourceIds'])}\n")
+
+    documents = MemoryDocuments(store)
+    inputs = dict(documents.projection_inputs())
+
+    def render(identity):
+        return documents.render(documents.read(identity[0]), source_states=identity[3])
+
+    next_cache = {}
+    expected = {path: digest(content) for path, content in content_by_path.items()}
+    for path, identity in inputs.items():
+        cached = document_cache.get(path)
+        if cached and cached[0] == identity:
+            expected[path] = cached[1]
+        else:
+            content_by_path[path] = render(identity)
+            expected[path] = digest(content_by_path[path])
+        next_cache[path] = (identity, expected[path])
+
+    wanted = list(expected)
+    report = {'files': wanted, 'writes': 0, 'revision': revision[0], 'retainedMessageLimit': 1000}
+    matching = await workspace.matching_file_digests(expected)
+    if revision != snapshot():
+        return report  # Runtime retries from the new database snapshot.
+
+    managed = store.get_setting('managedMemoryFiles') or []
+    managed_docs = store.get_setting('managedDocumentFiles') or []
+    tracked = set(managed) | set(managed_docs)
+    # Record new paths before publishing so a failed pass or concurrent
+    # forget can still remove them on the next pass.
+    new_paths = set(wanted) - tracked
+    if new_paths:
+        store.set_setting('managedMemoryFiles', sorted(set(managed) | new_paths))
+    for path in wanted:
+        if path in matching:
+            continue
+        if revision != snapshot():
+            return report
+        content = content_by_path[path] if path in content_by_path else render(inputs[path])
+        await workspace.write(path, content)
+        report['writes'] += 1
+
+    wanted_keys = {os.path.normcase(path) for path in wanted}
+    for path in tracked:
+        if os.path.normcase(path) in wanted_keys:
+            continue
+        if not (path.startswith('memory/agent/') or re.fullmatch(r'memory/(daily/\d{4}-\d{2}-\d{2}|people/[a-f0-9-]+)\.md', path)):
+            continue
+        if revision != snapshot():
+            return report
+        try:
+            await workspace.remove(path)
+        except FileNotFoundError:
+            pass
+    if revision == snapshot():
+        if managed != wanted:
+            store.set_setting('managedMemoryFiles', wanted)
+        if managed_docs != list(inputs):
+            store.set_setting('managedDocumentFiles', list(inputs))
+        document_cache.clear()
+        document_cache.update(next_cache)
+    return report
 
 
 CONTEXT_CHARACTER_LIMIT = 12000

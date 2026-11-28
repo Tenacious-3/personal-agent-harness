@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import shutil
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -98,6 +100,25 @@ class WorkspaceService:
             return raw.decode("utf-8"), info.st_size
         content, size = await asyncio.to_thread(load)
         return {"path": path, "content": content, "size": size}
+
+    async def matching_file_digests(self, expected: dict[str, bytes]) -> set[str]:
+        """Check projected files in one worker call, including same-size edits."""
+        def matching() -> set[str]:
+            result = set()
+            for path, digest in expected.items():
+                try:
+                    target = self._checked(path)
+                    info = target.lstat()
+                    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES:
+                        continue
+                    with _retry_sharing_violation(lambda: target.open("rb")) as stream:
+                        content = stream.read(MAX_BYTES + 1)
+                except FileNotFoundError:
+                    continue
+                if len(content) <= MAX_BYTES and hashlib.sha256(content).digest() == digest:
+                    result.add(path)
+            return result
+        return await asyncio.to_thread(matching)
 
     async def write(self, path: str, content: str) -> dict[str, Any]:
         if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_BYTES:
