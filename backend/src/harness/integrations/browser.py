@@ -3,19 +3,30 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import importlib
 import ipaddress
 import os
 import re
 import socket
+import secrets
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
+from harness.core.utils import ActionPreflightError
 
 TIMEOUT = 20_000
 PROFILE_MARKER = ".personal-assistant-profile"
 PROFILE_ID = "personal-assistant-harness/browser-profile/v1"
+MANUAL_SECONDS = 600
+MANUAL_KEYS = {"Tab", "Shift+Tab", "Enter", "Escape", "Backspace", "Delete", "ArrowUp",
+               "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "Control+a"}
+
+
+class ManualBrowserError(ValueError):
+    """An owner-facing takeover error that contains no page or input data."""
 
 
 def is_public_browser_address(address: str) -> bool:
@@ -124,9 +135,19 @@ class BrowserService:
         self._page_ids: dict[int, str] = {}
         self.last_error: str | None = None
         self.mutations = 0
+        self._manual_token = ""
+        self._manual_until = 0.0
+        self._manual_tab = ""
+        self._manual_frame = None
+        self._manual_sequence = 0
+        self._manual_navigation = 0
 
     def _configure_page(self, page: Any) -> None:
         self._page_ids[id(page)] = str(uuid.uuid4())
+        def invalidate_frame(frame):
+            if frame == page.main_frame:
+                self._manual_navigation += 1
+        page.on("framenavigated", invalidate_frame)
         page.on("dialog", lambda dialog: asyncio.create_task(dialog.dismiss()))
         page.on("download", lambda download: asyncio.create_task(download.cancel()))
 
@@ -147,7 +168,9 @@ class BrowserService:
         result: dict[str, Any] = {
             "available": installed, "active": self.context is not None,
             "visible": self.visible and self.context is not None,
-            "manualControl": self.visible and self.context is not None,
+            "manualControl": self.context is not None and bool(self.visible or self._manual_token),
+            "manualViewerActive": bool(self._manual_token),
+            "manualViewerExpired": bool(self._manual_token) and time.monotonic() >= self._manual_until,
             "profile": "dedicated", "browser": "chromium",
         }
         if self.last_error:
@@ -221,7 +244,14 @@ class BrowserService:
     async def _route_request(self, route: Any) -> None:
         try:
             await assert_public_browser_url(route.request.url)
-            if route.request.method not in ("GET", "HEAD", "OPTIONS") and not self.mutations and not self.visible:
+            owner_active = False
+            if self._manual_token and time.monotonic() < self._manual_until:
+                try:
+                    owner_active = self._page_ids.get(id(route.request.frame.page)) == self._manual_tab
+                except Exception:
+                    # A request without a frame cannot carry manual authorization.
+                    pass
+            if route.request.method not in ("GET", "HEAD", "OPTIONS") and not (self.mutations or self.visible or owner_active):
                 await route.abort("blockedbyclient")
                 return
             await route.continue_()
@@ -236,11 +266,93 @@ class BrowserService:
 
     async def launch(self, visible: bool = False) -> dict[str, Any]:
         async with self._lock:
+            self._require_automatic()
             await self._launch_internal(visible)
             return await self.status()
 
+    def _require_automatic(self):
+        if self._manual_token:
+            raise ActionPreflightError("Browser is under manual user control")
+
+    async def begin_manual(self, tab_id):
+        async with self._lock:
+            selected = tab_id or self._manual_tab
+            page = self._page(selected)
+            await assert_public_browser_url(page.url)
+            self._manual_token = secrets.token_urlsafe(24)
+            self._manual_until = time.monotonic() + MANUAL_SECONDS
+            self._manual_tab = selected
+            self._manual_frame = None
+            return {"lease": self._manual_token}
+
+    def _check_manual(self, lease, *, allow_expired=False):
+        if not self._manual_token or not isinstance(lease, str) or not lease.isascii() or not hmac.compare_digest(self._manual_token, lease):
+            raise ManualBrowserError("Manual browser session changed. Reconnect to continue.")
+        if not allow_expired and time.monotonic() >= self._manual_until:
+            raise ManualBrowserError("Manual browser session expired. Reconnect to continue.")
+
+    async def manual_frame(self, lease):
+        async with self._lock:
+            self._check_manual(lease)
+            try:
+                page = self._page(self._manual_tab)
+                url = page.url
+                navigation = self._manual_navigation
+                await assert_public_browser_url(url)
+                size = page.viewport_size
+                title = await page.title()
+                data = await page.screenshot(type="jpeg", quality=75, timeout=4000)
+                self._check_manual(lease)
+                if self._manual_navigation != navigation or page.url != url or not size:
+                    raise ManualBrowserError("Browser page changed. Refresh the view.")
+            except ManualBrowserError:
+                raise
+            except Exception:
+                raise ManualBrowserError("Browser view is unavailable. Reconnect to continue.") from None
+            self._manual_sequence += 1
+            self._manual_frame = (self._manual_sequence, url, size, navigation)
+            return {"frame": self._manual_sequence, "image": base64.b64encode(data).decode("ascii"),
+                    "origin": urlsplit(url).hostname, "title": title[:160], **size}
+
+    async def manual_input(self, lease, body):
+        async with self._lock:
+            self._check_manual(lease)
+            try:
+                page = self._page(self._manual_tab)
+                frame = self._manual_frame
+                if not frame or frame[0] != body.get("frame"):
+                    raise ManualBrowserError("Browser page changed. Refresh the view before entering input.")
+                await assert_public_browser_url(frame[1])
+                self._check_manual(lease)
+                if frame[1] != page.url or frame[3] != self._manual_navigation:
+                    raise ManualBrowserError("Browser page changed. Refresh the view before entering input.")
+                self._manual_frame = None
+                kind = body.get("kind")
+                if kind == "click":
+                    x, y = body.get("x"), body.get("y")
+                    if type(x) is not int or type(y) is not int or not (0 <= x < frame[2]["width"] and 0 <= y < frame[2]["height"]):
+                        raise ManualBrowserError("Click is outside the browser view.")
+                    await page.mouse.click(x, y)
+                elif kind == "text" and isinstance(body.get("value"), str) and 0 < len(body["value"]) <= 4096:
+                    await page.keyboard.insert_text(body["value"])
+                elif kind == "key" and isinstance(body.get("value"), str) and body["value"] in MANUAL_KEYS:
+                    await page.keyboard.press(body["value"])
+                else:
+                    raise ManualBrowserError("Unsupported manual browser input.")
+            except ManualBrowserError:
+                raise
+            except Exception:
+                raise ManualBrowserError("Browser input could not be delivered. Refresh the view.") from None
+
+    async def end_manual(self, lease):
+        async with self._lock:
+            self._check_manual(lease, allow_expired=True)
+            # Destroy the sign-in DOM before the assistant can observe a new page.
+            await self._close_session()
+
     async def tabs(self) -> list[dict[str, str]]:
         async with self._lock:
+            self._require_automatic()
             if self.context is None:
                 return []
             result = []
@@ -254,6 +366,7 @@ class BrowserService:
 
     async def navigate(self, url: str) -> dict[str, Any]:
         async with self._lock:
+            self._require_automatic()
             await assert_public_browser_url(url)
             await self._launch_internal(self.visible if self.context is not None else False)
             page = await self.context.new_page()
@@ -268,6 +381,7 @@ class BrowserService:
 
     async def snapshot(self, tab_id: str) -> dict[str, Any]:
         async with self._lock:
+            self._require_automatic()
             page = self._page(tab_id)
             await assert_public_browser_url(page.url)
             content = await page.locator("body").inner_text(timeout=TIMEOUT)
@@ -284,10 +398,12 @@ class BrowserService:
 
     async def close_tab(self, tab_id: str) -> None:
         async with self._lock:
+            self._require_automatic()
             await self._page(tab_id).close()
 
     async def screenshot(self, tab_id: str) -> dict[str, str]:
         async with self._lock:
+            self._require_automatic()
             page = self._page(tab_id)
             await assert_public_browser_url(page.url)
             data = await page.screenshot(type="png", full_page=False, timeout=TIMEOUT)
@@ -295,6 +411,7 @@ class BrowserService:
 
     async def click(self, tab_id: str, selector: str) -> dict[str, str]:
         async with self._lock:
+            self._require_automatic()
             if self.visible:
                 raise ValueError("Browser is under manual control. Resume headless mode before automatic actions.")
             if not selector or len(selector) > 2000:
@@ -310,6 +427,7 @@ class BrowserService:
 
     async def fill(self, tab_id: str, selector: str, value: str) -> dict[str, Any]:
         async with self._lock:
+            self._require_automatic()
             if self.visible:
                 raise ValueError("Browser is under manual control. Resume headless mode before automatic actions.")
             if not selector or len(selector) > 2000 or not isinstance(value, str) or len(value) > 12000:
@@ -328,11 +446,18 @@ class BrowserService:
 
     async def close(self) -> dict[str, bool]:
         async with self._lock:
-            if self.context is not None:
-                await self.context.close()
-            self.context = None
-            if self._playwright is not None:
-                await self._playwright.stop()
-                self._playwright = None
-            self._page_ids.clear()
+            await self._close_session()
             return {"active": False}
+
+    async def _close_session(self):
+        if self.context is not None:
+            await self.context.close()
+        self.context = None
+        if self._playwright is not None:
+            await self._playwright.stop()
+            self._playwright = None
+        self._page_ids.clear()
+        self._manual_token = ""
+        self._manual_until = 0.0
+        self._manual_tab = ""
+        self._manual_frame = None

@@ -12,6 +12,8 @@ import httpx
 from playwright.sync_api import expect, sync_playwright
 
 from harness.core.config import Config
+from harness.application.runtime import Runtime
+from tests.browser_sign_in_fixture import FIXTURE_URL, FIXTURE_VALUE, SignInFixture
 from tests.ui_acceptance import ROOT, TOKEN, serve
 
 
@@ -21,6 +23,76 @@ PAGES = ("Goals", "Memory", "History", "People", "Repairs", "Evidence",
 
 
 class PagesUIAcceptance(unittest.TestCase):
+    def test_docker_browser_sign_in_reconnect_and_persistent_profile(self):
+        with tempfile.TemporaryDirectory(prefix="harness-browser-control-ui-") as folder:
+            root = Path(folder)
+            config = Config(root=root, data_dir=root / '.assistant', port=0, token=TOKEN,
+                            encryption_secret=TOKEN, container_mode=True,
+                            frontend_dir=ROOT / 'frontend/dist', browser_channel='chromium')
+            services = []
+
+            def factory(config, store):
+                store.set_setting('nightlyDreamEnabled', False)
+                service = SignInFixture(config.data_dir / 'browser-profile', channel='chromium')
+                services.append(service)
+                return Runtime(config, store=store, browser=service)
+
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch()
+                try:
+                    page = browser.new_page()
+                    with serve(config, factory) as origin, httpx.Client(base_url=origin, trust_env=False,
+                            headers={'Authorization': f'Bearer {TOKEN}'}) as api:
+                        page.goto(origin)
+                        page.get_by_label('Workspace access token').fill(TOKEN)
+                        page.get_by_role('button', name='Connect workspace', exact=True).click()
+                        nav = page.get_by_role('navigation', name='Main navigation')
+                        tool = nav.get_by_role('button', name='Browser', exact=True)
+                        if not tool.is_visible():
+                            nav.get_by_role('button', name='More tools', exact=True).click()
+                        tool.click()
+                        expect(page.get_by_role('button', name='Open browser window', exact=True)).to_have_count(0)
+                        page.get_by_label('Public website URL').fill(FIXTURE_URL)
+                        page.get_by_role('button', name='Navigate', exact=True).click()
+                        page.get_by_role('button', name='Sign in manually', exact=True).click()
+                        view = page.get_by_role('img', name='Interactive view of the current dedicated browser tab')
+                        expect(view).to_be_visible()
+                        self.assertEqual(api.get('/api/browser/tabs').status_code, 400)
+                        self.assertEqual(httpx.post(origin+'/api/browser/manual/frame',json={}).status_code,401)
+                        previous_lease = services[-1]._manual_token
+                        services[-1]._manual_until = 0
+                        page.get_by_role('button', name='Refresh browser view', exact=True).click()
+                        expect(page.get_by_role('alert')).to_contain_text('session expired')
+                        self.assertTrue(api.get('/api/browser/status').json()['manualControl'])
+                        page.reload()
+                        page.get_by_role('button', name='Reconnect browser sign-in', exact=True).click()
+                        expect(view).to_be_visible()
+                        self.assertEqual(api.post('/api/browser/manual/frame', json={'lease': previous_lease}).status_code, 409)
+                        view.scroll_into_view_if_needed()
+                        box = view.bounding_box()
+                        page.mouse.click(box['x'] + 120 * box['width'] / 1365, box['y'] + 110 * box['height'] / 900)
+                        page.get_by_label('Text for the focused browser field').fill(FIXTURE_VALUE)
+                        page.get_by_role('button', name='Type into browser', exact=True).click()
+                        expect(page.get_by_label('Text for the focused browser field')).to_have_value('')
+                        page.get_by_role('button', name='Enter', exact=True).click()
+                        refresh = page.get_by_role('button', name='Refresh browser view', exact=True)
+                        refresh.click()
+                        expect(view).to_be_visible()
+                        expect(page.get_by_text('Fixture signed in', exact=True)).to_be_visible()
+                        page.get_by_role('button', name='End sign-in and return control', exact=True).click()
+                        expect(view).to_have_count(0)
+                        self.assertFalse(api.get('/api/browser/status').json()['manualControl'])
+                    config.port = 0
+                    with serve(config, factory) as restarted, httpx.Client(base_url=restarted, trust_env=False,
+                            headers={'Authorization': f'Bearer {TOKEN}'}) as api:
+                        tab = api.post('/api/browser/navigate', json={'url': FIXTURE_URL})
+                        tab.raise_for_status()
+                        snapshot = api.get('/api/browser/snapshot', params={'tabId': tab.json()['id']})
+                        self.assertIn('Fixture signed in', snapshot.json()['text'])
+                    print('Docker manual sign-in, expiry, reconnect, handoff, and persistent login passed')
+                finally:
+                    browser.close()
+
     def test_every_page_themes_navigation_and_small_screens(self):
         with tempfile.TemporaryDirectory(prefix="harness-pages-ui-") as folder:
             root = Path(folder)

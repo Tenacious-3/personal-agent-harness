@@ -138,9 +138,13 @@ outside Git and image build inputs.
   capabilities and resource limits. No Docker socket is mounted.
 - Chromium is installed from the locked Playwright version and uses only the
   dedicated application profile. Headless navigation/approval policy remains
-  enforced. A visible Linux browser window is not automatically displayed on
-  the Windows desktop; manual-login/takeover support requires a separate
-  deliberate design. No unauthenticated display/CDP/VNC port is published.
+  enforced. To sign in, open a public page in Browser, select its tab, then
+  choose **Sign in manually**. The authenticated viewer is available through
+  the app's loopback address. The assistant pauses browser access until you
+  choose **End sign-in and return control**. After ten minutes, reconnect to
+  continue. Ending sign-in closes the tabs and keeps persistent site sessions
+  in the dedicated profile. No separate display or browser debugging port is
+  published.
 - Script execution stays off. Installing the app in Docker does not grant the
   model host-shell access or nested Docker administration. A future isolated
   execution broker must remain a separate authorization boundary.

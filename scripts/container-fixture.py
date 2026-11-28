@@ -6,6 +6,7 @@ import uvicorn
 from harness.api.server import create_app
 from harness.application.runtime import Runtime
 from harness.core.config import load_config
+from tests.browser_sign_in_fixture import SignInFixture
 
 
 async def synthetic_runner(config, prompt, context, caps):
@@ -15,7 +16,8 @@ async def synthetic_runner(config, prompt, context, caps):
 
 def runtime_factory(config, store):
     store.set_setting("nightlyDreamEnabled", False)
-    return Runtime(config, store=store, runner=synthetic_runner)
+    browser = SignInFixture(config.data_dir / 'browser-profile', channel='chromium')
+    return Runtime(config, store=store, runner=synthetic_runner, browser=browser)
 
 
 config = load_config()
