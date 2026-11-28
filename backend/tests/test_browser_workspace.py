@@ -4,7 +4,8 @@ import tempfile
 import unittest
 import os
 import time
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from pathlib import Path
 
 from harness.integrations.browser import (
@@ -18,6 +19,29 @@ _TEST_TEMP_ROOT = Path.cwd()
 
 
 class BrowserPolicyTests(OfflineAsyncCase):
+    async def test_manual_post_permission_is_bound_to_tab_and_expires(self):
+        with RetryTemporaryDirectory(dir=_TEST_TEMP_ROOT) as folder:
+            service = BrowserService(Path(folder) / ".assistant" / "browser-profile")
+            selected, other = object(), object()
+            service._page_ids = {id(selected): "selected", id(other): "other"}
+            service._manual_tab = "selected"
+            service._manual_token = "test-lease"
+            service._manual_until = time.monotonic() + 30
+            for page, allowed in ((selected, True), (other, False), (None, False)):
+                route = SimpleNamespace(
+                    request=SimpleNamespace(url="https://93.184.215.14/", method="POST",
+                                            frame=SimpleNamespace(page=page)),
+                    abort=AsyncMock(), continue_=AsyncMock(),
+                )
+                await service._route_request(route)
+                self.assertEqual(route.continue_.await_count, int(allowed))
+                self.assertEqual(route.abort.await_count, int(not allowed))
+            service._manual_until = 0
+            route.request.frame.page = selected
+            route.abort.reset_mock()
+            await service._route_request(route)
+            route.abort.assert_awaited_once()
+
     def test_public_address_filter(self):
         self.assertTrue(is_public_browser_address("8.8.8.8"))
         for address in ("127.0.0.1", "10.1.2.3", "169.254.1.1", "192.168.0.2", "224.0.0.1", "::1", "2001:db8::1"):

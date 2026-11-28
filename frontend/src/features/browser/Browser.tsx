@@ -7,6 +7,7 @@ import { useResource } from "../../hooks/useResource";
 import { useAction } from "../../hooks/useAction";
 import { Empty, Card, Status, Feedback, Refresh } from "../../components/ui";
 import { type View } from "../../app/navigation";
+import { ManualBrowser } from "./ManualBrowser";
 
 export function Browser({
   api,
@@ -29,6 +30,10 @@ export function Browser({
   const [image, setImage] = useState("");
   const [selector, setSelector] = useState("");
   const [value, setValue] = useState("");
+  const [lease, setLease] = useState("");
+  const manual = Boolean(status.data.manualViewerActive || lease);
+  const viewerAvailable = status.data.manualViewerAvailable === true &&
+    ["localhost", "127.0.0.1"].includes(window.location.hostname);
   const items = list(tabs.data, "tabs");
   useEffect(() => {
     setTabId((previous) =>
@@ -92,7 +97,7 @@ export function Browser({
     <>
       <Feedback
         loading={status.loading || tabs.loading}
-        error={status.error || tabs.error || action.error}
+        error={status.error || (!manual ? tabs.error : "") || action.error}
         notice={action.notice}
       />
       <Card
@@ -113,14 +118,14 @@ export function Browser({
           This profile is separate from your everyday browser.
           {status.data.manualLoginAvailable === true && " Open its window to sign in manually. Enter passwords and verification codes there."}
         </p>
-        {status.data.manualLoginAvailable === false && (
+        {status.data.manualLoginAvailable === false && !viewerAvailable && (
           <p className="section-description">Manual browser sign-in is unavailable in this Docker setup. Headless browsing is available.</p>
         )}
         <div className="button-row">
           <Button
             label="Start browser"
             variant="primary"
-            isDisabled={action.busy}
+            isDisabled={action.busy || manual}
             onClick={() => launch(false)}
           />
           {status.data.manualLoginAvailable === true && <Button
@@ -129,7 +134,19 @@ export function Browser({
             isDisabled={action.busy}
             onClick={() => launch(true)}
           />}
-          {Boolean(status.data.manualControl) && <Button
+          {viewerAvailable && <Button
+            label={manual ? "Reconnect browser sign-in" : "Sign in manually"}
+            variant="secondary"
+            isDisabled={action.busy || (!manual && !tabId)}
+            onClick={() => void action.run(async () => {
+              const result = await api("/browser/manual/start", { tabId: manual ? "" : tabId });
+              setSnapshot(null);
+              setImage("");
+              setLease(txt(result.lease));
+              await status.reload();
+            })}
+          />}
+          {Boolean(status.data.manualControl) && !manual && <Button
             label="Return browser control"
             variant="secondary"
             isDisabled={action.busy || !status.data.active}
@@ -142,6 +159,7 @@ export function Browser({
             onClick={() =>
               void action.run(async () => {
                 await api("/browser/close", {});
+                setLease("");
                 setSnapshot(null);
                 setImage("");
                 await reload();
@@ -171,12 +189,17 @@ export function Browser({
             label="Navigate"
             variant="primary"
             isDisabled={
-              action.busy || !url.trim() || Boolean(status.data.manualControl)
+              action.busy || !url.trim() || manual || Boolean(status.data.manualControl)
             }
             onClick={go}
           />
         </form>
       </Card>
+      {lease && <ManualBrowser key={lease} api={api} lease={lease} onEnd={async () => {
+        setLease("");
+        await reload();
+      }} />}
+      {!manual && <>
       <Card
         title="Observe before acting"
         actions={<Refresh reload={reload} disabled={action.busy} />}
@@ -301,6 +324,7 @@ export function Browser({
           </div>
         </div>
       </Card>
+      </>}
     </>
   );
 }

@@ -104,6 +104,10 @@ class ServerTests(OfflineAsyncCase):
         app = create_app(self.config, FakeRuntime)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://harness:8787') as client:
             self.assertEqual((await client.get('/health')).status_code, 200)
+            manual = await client.post('/api/browser/manual/start', json={},
+                headers={'Authorization': f'Bearer {self.config.token}', 'X-Forwarded-Host': 'localhost:8787'})
+            self.assertEqual(manual.status_code, 403)
+            self.assertIn('loopback', manual.json()['error'])
             self.assertEqual((await client.get('/health', headers={'Host': 'harness:8788'})).status_code, 400)
             self.assertEqual((await client.get('/health', headers={'Host': 'evil.example:8787',
                 'X-Forwarded-Host': 'harness:8787', 'X-Forwarded-Proto': 'https'})).status_code, 400)

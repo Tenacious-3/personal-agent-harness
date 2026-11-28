@@ -128,6 +128,14 @@ def main():
                "from pathlib import Path; p=Path('/data/.assistant/browser-profile/.personal-assistant-profile'); "
                "assert p.is_file(); assert p.read_text()=='personal-assistant-harness/browser-profile/v1'")
 
+    fixture_url = 'https://93.184.215.14/'
+
+    def verify_browser_login():
+        tab = request('/api/browser/navigate', {'url': fixture_url})
+        snapshot = request('/api/browser/snapshot?tabId=' + tab['id'])
+        assert 'Fixture signed in' in snapshot['text']
+        request('/api/browser/close', {})
+
     try:
         docker("volume", "create", volume, capture=True)
         start()
@@ -152,7 +160,15 @@ def main():
             time.sleep(.1)
         request("/api/browser/launch", {"visible": False})
         request("/api/browser/navigate", {"url": "http://127.0.0.1/private-destination"}, expected=400)
-        request("/api/browser/close", {})
+        tab = request('/api/browser/navigate', {'url': fixture_url})
+        lease = request('/api/browser/manual/start', {'tabId': tab['id']})['lease']
+        request('/api/browser/tabs', expected=400)
+        for command in ({'kind': 'click', 'x': 120, 'y': 110},
+                        {'kind': 'text', 'value': 'fixture-only-value'}, {'kind': 'key', 'value': 'Enter'}):
+            frame = request('/api/browser/manual/frame', {'lease': lease})
+            request('/api/browser/manual/input', {'lease': lease, 'frame': frame['frame'], **command})
+        request('/api/browser/manual/end', {'lease': lease})
+        verify_browser_login()
         verify_persisted(memory["id"], approval["id"], schedule["id"],document['id'])
         docker("restart", container, capture=True)
         wait_ready()
@@ -161,7 +177,8 @@ def main():
         docker("rm", container, capture=True)
         start()
         verify_persisted(memory["id"], approval["id"], schedule["id"],document['id'])
-        print("Container auth, exact approval/replay, schedule, browser policy, restart and recreation persistence passed")
+        verify_browser_login()
+        print("Container auth, approval/replay, scheduling, SQLite persistence, and dedicated sign-in across recreation passed")
     except BaseException:
         docker("logs", "--tail", "80", container, check=False)
         raise

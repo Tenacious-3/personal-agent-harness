@@ -23,8 +23,8 @@ class RequestGuards:
 
     def __init__(self, app: ASGIApp, port: int, allowed_hosts: tuple[str, ...] = ()):
         self.app = app
-        self.allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
-        self.allowed_hosts.update(container_hosts(','.join(allowed_hosts)))
+        self.loopback_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        self.allowed_hosts = self.loopback_hosts | set(container_hosts(','.join(allowed_hosts)))
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -34,6 +34,9 @@ class RequestGuards:
         host = headers.get(b"host", b"").decode("latin-1").lower().rstrip(".")
         if host not in self.allowed_hosts:
             await self._respond(send, 400, b'{"detail":"Invalid Host header"}', "application/json")
+            return
+        if scope.get("path", "").startswith("/api/browser/manual/") and host not in self.loopback_hosts:
+            await self._respond(send, 403, b'{"error":"Manual browser control requires a loopback address"}', "application/json")
             return
         length = headers.get(b"content-length")
         if length:
